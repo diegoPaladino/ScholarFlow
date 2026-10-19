@@ -1,0 +1,30 @@
+# Local history and generated files
+archive/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+.venv/
+venv/
+.vscode/
+# Student records and local document caches
+cache_*/
+*.csv
+*.xls
+*.xlsx
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.webp
+*.log
+curso_coords.json
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key

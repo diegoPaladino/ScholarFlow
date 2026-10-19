@@ -1,0 +1,5 @@
+playwright
+PyAutoGUI
+clipboard
+pyperclip
+Pillow

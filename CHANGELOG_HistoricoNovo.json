@@ -1,0 +1,188 @@
+{
+  "arquivo_principal": "main.py",
+  "proposito": "Registro historico das alteracoes feitas no programa para orientar manutencoes futuras.",
+  "orientacao": "Sempre que o codigo for alterado, adicionar uma nova entrada em 'alteracoes' com data, resumo, arquivos e impactos.",
+  "alteracoes": [
+    {
+      "data": "2026-10-19",
+      "tipo": "organizacao do projeto ScholarFlow",
+      "arquivos": [
+        "main.py",
+        ".gitignore",
+        "README.md",
+        "requirements.txt"
+      ],
+      "resumo": [
+        "Renomeado HistoricoNovo-v1.1.0.py para main.py sem alterar a logica do aplicativo.",
+        "Versoes antigas preservadas localmente em archive e excluidas do versionamento.",
+        "Verificadores atualizados para localizar main.py a partir de sua propria pasta."
+      ]
+    },
+    {
+      "data": "2026-10-06",
+      "tipo": "correcao do primeiro clique apos login",
+      "arquivos": [
+        "HistoricoNovo-v1.1.0.py",
+        "verificar_navegacao.py",
+        "CHANGELOG_HistoricoNovo.json"
+      ],
+      "resumo": [
+        "HTML fornecido corresponde a selecao de modulos e nao contem js-nav-menu.",
+        "Substituido XPath posicional pelo cartao module-card cujo onclick aponta para /app/academico.asp. Mantidos os passos seguintes para teste pelo usuario."
+      ],
+      "validacao": [
+        "XPath validado com lxml contra OUTERHTML.txt: exatamente um cartao Academico.",
+        "python -m py_compile HistoricoNovo-v1.1.0.py",
+        "python verificar_navegacao.py"
+      ],
+      "limitacoes": [
+        "Aguardando teste real do usuario antes de prosseguir com outros ajustes."
+      ]
+    },
+    {
+      "data": "2026-10-06",
+      "tipo": "adaptacao de navegacao apos login",
+      "arquivos": [
+        "HistoricoNovo-v1.1.0.py",
+        "verificar_navegacao.py",
+        "CHANGELOG_HistoricoNovo.json"
+      ],
+      "resumo": [
+        "Apos Acessar, seleciona o modulo academico, o menu Manutencao e Historico Escolar - Lancamento pelos tres XPaths fornecidos.",
+        "Aguarda visibilidade dos itens e carregamento da pagina, com erro identificando a etapa que falhou.",
+        "Mantida recuperacao da tela por URL direta em sessoes ja autenticadas e validacao final do campo de matricula."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-v1.1.0.py",
+        "python verificar_navegacao.py",
+        "python verificar_observacoes.py"
+      ],
+      "limitacoes": [
+        "Testes simulados; navegacao real no GEMUL ainda precisa ser conferida."
+      ]
+    },
+    {
+      "data": "2026-10-06",
+      "tipo": "adaptacao de layout / leitura IA",
+      "arquivos": [
+        "HistoricoNovo-v1.1.0.py",
+        "verificar_observacoes.py",
+        "CHANGELOG_HistoricoNovo.json"
+      ],
+      "resumo": [
+        "Separadas observacoes do ano (txt_observacoes) e gerais (txt_observacoes_gerais) no schema, prompt, normalizacao, revisao e persistencia.",
+        "Lancamento envia observacao do ano a txtObservacao e observacao geral a txtObservacaoGeral, em todas as series suportadas.",
+        "Preservadas observacoes extraidas junto das regras automaticas sem repetir textos ja presentes.",
+        "Versionada chave do cache OCR para novas leituras usarem a separacao; caches antigos continuam com texto no campo do ano e geral vazio."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-v1.1.0.py",
+        "python verificar_observacoes.py"
+      ],
+      "limitacoes": [
+        "Validacao isolada com preenchimento simulado; conferir o novo layout no GEMUL em uso real."
+      ]
+    },
+    {
+      "data": "2026-04-27",
+      "tipo": "correcao",
+      "arquivos": [
+        "HistoricoNovo-202603200835.py",
+        "CHANGELOG_HistoricoNovo.json"
+      ],
+      "resumo": [
+        "Reforcada normalizacao de texto UTF-8/portugues Brasil nas observacoes.",
+        "Textos de observacao agora sao corrigidos ao ler da tela, ao preencher a tela, ao mesclar observacoes e imediatamente antes de enviar ao GEMUL.",
+        "Adicionadas substituicoes residuais para casos comuns como Historico, Resolucao, observacao, Goiania e numero ordinal quando chegam em mojibake."
+      ],
+      "impacto_esperado": [
+        "Evitar que novas observacoes sejam lancadas com palavras corrompidas por mojibake em vez de acentos corretos.",
+        "Normalizar textos vindos de cache antigo, IA ou campo manual antes do envio."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-202603200835.py",
+        "python -m json.tool CHANGELOG_HistoricoNovo.json"
+      ]
+    },
+    {
+      "data": "2026-04-27",
+      "tipo": "correcao",
+      "arquivos": [
+        "HistoricoNovo-202603200835.py",
+        "CHANGELOG_HistoricoNovo.json"
+      ],
+      "resumo": [
+        "Corrigido lancamento de anos sem nenhuma nota numerica util.",
+        "Quando houver notas, o programa continua lancando apenas disciplinas preenchidas.",
+        "Quando nao houver nenhuma nota util, o programa cria uma unica inclusao minima com omitir media para o GEMUL gravar o ano e as observacoes."
+      ],
+      "impacto_esperado": [
+        "Evitar que anos de conceitos/ficha descritiva fiquem parados na tela sem serem incluidos.",
+        "Manter o ganho de produtividade sem voltar a lancar todas as materias vazias."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-202603200835.py",
+        "python -m json.tool CHANGELOG_HistoricoNovo.json"
+      ]
+    },
+    {
+      "data": "2026-04-27",
+      "tipo": "performance/manutencao",
+      "arquivos": [
+        "HistoricoNovo-202603200835.py",
+        "CHANGELOG_HistoricoNovo.json"
+      ],
+      "resumo": [
+        "Criado changelog JSON para registrar historico de releases, melhorias, exclusoes e ajustes.",
+        "Alterado modelo padrao da IA de gpt-5 para gpt-5-mini, mantendo OPENAI_MODEL como override por variavel de ambiente.",
+        "Reduzido pre-processamento de imagem para OCR_IA_MAX_IMAGE_SIDE=1200 e OCR_IA_JPEG_QUALITY=82, com override por variaveis de ambiente.",
+        "Adicionado cache local por hash do conteudo dos arquivos, recortes, modelo e parametros de imagem para evitar nova chamada OpenAI ao reler o mesmo historico."
+      ],
+      "impacto_esperado": [
+        "Reduzir tempo de leitura com IA em leituras novas pelo uso de modelo menor e imagem mais leve.",
+        "Tornar releituras do mesmo arquivo praticamente imediatas quando houver cache local.",
+        "Preservar possibilidade de maior qualidade configurando OPENAI_MODEL, OCR_IA_MAX_IMAGE_SIDE ou OCR_IA_JPEG_QUALITY no ambiente."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-202603200835.py"
+      ]
+    },
+    {
+      "data": "2026-04-27",
+      "tipo": "produtividade",
+      "arquivos": [
+        "HistoricoNovo-202603200835.py"
+      ],
+      "resumo": [
+        "Lancamento de disciplinas passou a ignorar notas vazias, tracos, N/A, sem nota e zero.",
+        "Adicionada protecao em processar_disciplina para nao gravar 0 quando nao houver nota util."
+      ],
+      "impacto_esperado": [
+        "Evitar lancar materias sem nota, priorizando apenas disciplinas preenchidas como Educacao Fisica em historicos com ficha descritiva."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-202603200835.py"
+      ]
+    },
+    {
+      "data": "2026-04-27",
+      "tipo": "funcionalidade",
+      "arquivos": [
+        "HistoricoNovo-202603200835.py"
+      ],
+      "resumo": [
+        "Adicionado checkbox Deve historico.",
+        "Persistido status de devedor de historico no cache/registros por matricula.",
+        "Adicionado aviso ao consultar novamente matricula marcada como devedora de historico.",
+        "Adicionado botao RESET para restaurar a tela ao estado inicial sem apagar registros salvos."
+      ],
+      "impacto_esperado": [
+        "Permitir controle local de alunos devedores de historico.",
+        "Facilitar nova operacao sem reiniciar o programa."
+      ],
+      "validacao": [
+        "python -m py_compile HistoricoNovo-202603200835.py"
+      ]
+    }
+  ]
+}
