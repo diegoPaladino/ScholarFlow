@@ -1,6 +1,9 @@
-﻿# Bibliotecas
+# Bibliotecas
 # -*- coding: utf-8 -*-
 import time
+import credenciais_locais
+import whatsapp_posicao
+from student_sync import atualizar_base_diaria, base_atualizada_hoje, verificar_espaco
 from datetime import datetime
 import json
 import base64
@@ -36,7 +39,7 @@ LOG_FILE_PATH = os.path.join(
 )
 GEMUL_BASE_URL = "https://gemul-aparecida.com.br"
 GEMUL_LOGIN_URL = f"{GEMUL_BASE_URL}/login.asp"
-GEMUL_HISTORICO_URL = f"{GEMUL_BASE_URL}/app/sca_historico_escolarCon.asp"
+GEMUL_HISTORICO_URL = f"{GEMUL_BASE_URL}/app/sca_historico_escolar_novoCon.asp"
 AUTO_HISTORICO_DIR = r"C:\Users\Public\001_historicos"
 LLM_SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".pdf", ".txt"}
 OCR_IA_TIMEOUT_SEGUNDOS = 180
@@ -105,12 +108,51 @@ def maximizar_janela_tk(janela: tk.Misc) -> None:
         pass
 
 
+def reparar_acentos_mistos(texto: str) -> str:
+    """Decode UTF-8 byte sequences stored as Latin-1/Windows-1252 characters."""
+    def byte_caractere(caractere):
+        for encoding in ("cp1252", "latin-1"):
+            try:
+                return caractere.encode(encoding)[0]
+            except UnicodeEncodeError:
+                continue
+        return None
+
+    for _ in range(3):
+        resultado = []
+        indice = 0
+        alterado = False
+        while indice < len(texto):
+            primeiro = byte_caractere(texto[indice])
+            tamanho = (2 if primeiro is not None and 0xC2 <= primeiro <= 0xDF else
+                       3 if primeiro is not None and 0xE0 <= primeiro <= 0xEF else
+                       4 if primeiro is not None and 0xF0 <= primeiro <= 0xF4 else 0)
+            trecho = texto[indice:indice + tamanho] if tamanho else ""
+            valores = [byte_caractere(c) for c in trecho]
+            if tamanho and len(valores) == tamanho and all(v is not None for v in valores):
+                try:
+                    corrigido = bytes(valores).decode("utf-8")
+                except UnicodeDecodeError:
+                    pass
+                else:
+                    resultado.append(corrigido)
+                    indice += tamanho
+                    alterado = True
+                    continue
+            resultado.append(texto[indice])
+            indice += 1
+        texto = "".join(resultado)
+        if not alterado:
+            break
+    return texto
+
+
 def corrigir_texto_utf8(valor) -> str:
     texto = "" if valor is None else str(valor)
     if not texto:
         return ""
 
-    texto = texto.replace("\ufeff", "")
+    texto = reparar_acentos_mistos(texto.replace("\ufeff", ""))
     for _ in range(2):
         if not any(marcador in texto for marcador in MARCADORES_TEXTO_CORROMPIDO):
             break
@@ -221,6 +263,97 @@ import re
 import unicodedata
 import csv
 import difflib
+
+
+def solicitar_credenciais_gemul():
+    try:
+        salvas = credenciais_locais.carregar()
+    except Exception:
+        salvas = {}
+        messagebox.showwarning("Credenciais", "Não foi possível ler as credenciais salvas. Informe-as novamente.")
+
+    class LoginDialog(simpledialog.Dialog):
+        def body(self, master):
+            self.usuario = tk.StringVar(value=os.getenv('GEMUL_USERNAME') or salvas.get('usuario', ''))
+            self.senha = tk.StringVar(value=os.getenv('GEMUL_PASSWORD') or salvas.get('senha', ''))
+            self.lembrar = tk.BooleanVar(value=bool(salvas))
+            ttk.Label(master, text="Usuário:").grid(row=0, column=0, sticky='w')
+            entrada = ttk.Entry(master, textvariable=self.usuario, width=32)
+            entrada.grid(row=0, column=1, padx=8, pady=5)
+            ttk.Label(master, text="Senha:").grid(row=1, column=0, sticky='w')
+            ttk.Entry(master, textvariable=self.senha, show='*', width=32).grid(row=1, column=1, padx=8, pady=5)
+            ttk.Checkbutton(master, text="Lembrar credenciais neste Windows", variable=self.lembrar).grid(row=2, columnspan=2, pady=8)
+            ttk.Label(master, text="Desmarque para apagar as credenciais memorizadas.").grid(row=3, columnspan=2)
+            return entrada
+
+        def validate(self):
+            if not self.usuario.get().strip() or not self.senha.get():
+                messagebox.showwarning('GEMUL', 'Informe usuário e senha.', parent=self)
+                return False
+            return True
+
+        def apply(self):
+            self.result = (self.usuario.get().strip(), self.senha.get(), self.lembrar.get())
+
+    dialogo = LoginDialog(tk._default_root, title='Acesso ao GEMUL')
+    if not dialogo.result:
+        raise RuntimeError('Login cancelado.')
+    login, senha, lembrar = dialogo.result
+    if not lembrar:
+        credenciais_locais.esquecer()
+    return login, senha, lembrar
+
+
+def gerar_texto_cobranca_historico(dados):
+    nome = str(dados.get('nome_aluno', '')).strip()
+    matricula = re.sub(r'\D', '', str(dados.get('numero_matricula', '')))
+    if not nome or len(matricula) != 9:
+        raise ValueError('Informe o nome do aluno e uma matrícula válida para gerar a cobrança.')
+    escola = str(dados.get('nome_escola', '')).strip() or ESCOLA_PADRAO
+    return (
+        f"Olá! Falta entregar o histórico escolar de {nome} (matrícula {matricula}).\n\n"
+        f"Peça esse documento na escola anterior e entregue na secretaria da {escola}.\n\n"
+        f"Se já entregou, avise a secretaria. Obrigado!"
+    )
+
+
+def registrar_etapa_historico(etapa, pagina=None, **detalhes):
+    evento = {"data_hora": datetime.now().astimezone().isoformat(), "etapa": etapa,
+              "url": getattr(pagina, "url", ""), **detalhes}
+    print("HISTORICO " + json.dumps(evento, ensure_ascii=False, default=str))
+
+
+def indice_registro_historico(linhas, ano, serie, escola):
+    candidatos = []
+    for indice, celulas in enumerate(linhas):
+        if len(celulas) < 5:
+            continue
+        if (str(celulas[0]).strip() == str(ano)
+                and normalizar_serie(celulas[4]) == normalizar_serie(serie)
+                and normalizar_texto_busca(celulas[2]) == normalizar_texto_busca(escola)):
+            candidatos.append(indice)
+    if len(candidatos) > 1:
+        raise RuntimeError("Mais de um registro corresponde ao ano, serie e escola. Confira os registros no GEMUL.")
+    return candidatos[0] if candidatos else None
+
+
+def abrir_disciplinas_registro(pagina, ano, serie, escola, obrigatorio=True, timeout_ms=15000):
+    pagina.wait_for_load_state("domcontentloaded")
+    linhas = pagina.locator('tr').filter(has=pagina.locator('button[onclick*="editarDisciplinas"]'))
+    dados = linhas.evaluate_all("rows => rows.map(row => Array.from(row.cells).map(cell => cell.innerText.trim()))")
+    indice = indice_registro_historico(dados, ano, serie, escola)
+    registrar_etapa_historico("selecionar_registro", pagina, ano=ano, serie=serie,
+                             escola=escola, registros=dados, indice=indice)
+    if indice is None:
+        if obrigatorio:
+            raise RuntimeError(f"Registro de {ano}, {serie}, {escola} nao encontrado na lista de estudos realizados.")
+        return False
+    botao = linhas.nth(indice).get_by_role("button", name="Editar Disciplinas", exact=True)
+    botao.scroll_into_view_if_needed(timeout=timeout_ms)
+    botao.click(timeout=timeout_ms)
+    pagina.locator('#cmbDisciplina').wait_for(state="visible", timeout=timeout_ms)
+    registrar_etapa_historico("disciplinas_abertas", pagina, ano=ano, serie=serie)
+    return True
 
 
 class By:
@@ -721,6 +854,7 @@ class FuncoesDoPrograma:
     # NOVA VERSÃƒO: Playwright
     def abrir_chrome():
         global play, browser, context, driver
+        verificar_espaco(os.path.dirname(os.path.abspath(__file__)))
         play = sync_playwright().start()
         try:
             browser = play.chromium.launch(
@@ -750,8 +884,11 @@ class FuncoesDoPrograma:
         botao_login = page.locator('xpath=//*[@id="frm"]/button')
 
         usuario.wait_for(state="visible", timeout=10000)
-        usuario.fill("DIEGO.CSF")
-        senha.fill("GMLPALADINO")
+        login, password, lembrar = solicitar_credenciais_gemul()
+        if not login or not password:
+            raise RuntimeError("Login cancelado. Informe usuario e senha para continuar.")
+        usuario.fill(login)
+        senha.fill(password)
 
         # Clique no botao Acessar
         botao_login.click()
@@ -760,6 +897,11 @@ class FuncoesDoPrograma:
             page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
+        if lembrar and '/app/' in page.url.lower():
+            try:
+                credenciais_locais.salvar(login, password)
+            except Exception:
+                messagebox.showwarning('Credenciais', 'O login foi realizado, mas não foi possível memorizar as credenciais.')
         print(f'Login enviado pelo botao "Acessar". URL atual apos login: {page.url}')
 
     def abrir_novas_abas(driver):
@@ -989,7 +1131,9 @@ class FuncoesDoPrograma:
         pagina = _get_base(driver_ref if driver_ref is not None else driver)
         if pagina is None:
             raise RuntimeError("Nenhuma pagina ativa do navegador foi encontrada para abrir o formulario.")
-        incluir_btn = pagina.locator('xpath=//*[@id="panel-8"]/div[2]/div/div[3]/button[1]')
+        incluir_btn = pagina.locator('#btnIncluir')
+        if not incluir_btn.count():
+            incluir_btn = pagina.get_by_role("button", name="Incluir", exact=True).first
         _garantir_locator_visivel(pagina, incluir_btn, timeout_ms=10000)
 
         estrategias = (
@@ -997,10 +1141,7 @@ class FuncoesDoPrograma:
             ("clique forcado", lambda: incluir_btn.click(force=True)),
             (
                 "clique via javascript",
-                lambda: pagina.eval_on_selector(
-                    'xpath=//*[@id="panel-8"]/div[2]/div/div[3]/button[1]',
-                    "el => el.click()",
-                ),
+                lambda: incluir_btn.evaluate("el => el.click()"),
             ),
         )
 
@@ -1040,6 +1181,45 @@ class FuncoesDoPrograma:
                 print("Recarregando a tela de historico com a sessao atual para tentar novamente...")
                 pagina_atual = garantir_sessao_gemul(matricula_atual, force_reabrir_tela=True)
         return pagina_atual
+
+    def garantir_etapa_disciplinas(driver, timeout_ms=15000):
+        pagina = _get_base(driver)
+        disciplina = pagina.locator('#cmbDisciplina')
+        if disciplina.count():
+            disciplina.wait_for(state="visible", timeout=timeout_ms)
+            return
+        alvo = sessao_execucao.get("historico_alvo", {})
+        if "sca_historico_escolar_novocon.asp" in pagina.url.lower():
+            abrir_disciplinas_registro(pagina, **alvo, timeout_ms=timeout_ms)
+            return
+        # The initial history form must be saved before disciplines exist in the DOM.
+        if "sca_historico_escolar_novo.asp" not in pagina.url.lower():
+            disciplina.wait_for(state="visible", timeout=timeout_ms)
+            return
+        botao = pagina.get_by_role("button", name="Incluir", exact=True)
+        if not botao.count():
+            botao = pagina.locator('input[type="submit"][value="Incluir"], input[type="button"][value="Incluir"]')
+        botao = botao.first
+        botao.wait_for(state="attached", timeout=timeout_ms)
+        try:
+            botao.scroll_into_view_if_needed(timeout=3000)
+        except PlaywrightTimeoutError:
+            for _ in range(12):
+                pagina.keyboard.press("PageDown")
+                pagina.wait_for_timeout(150)
+                if botao.is_visible():
+                    try:
+                        botao.scroll_into_view_if_needed(timeout=1000)
+                        break
+                    except PlaywrightTimeoutError:
+                        continue
+        registrar_etapa_historico("salvar_cabecalho", pagina, **alvo)
+        botao.click(timeout=timeout_ms)
+        pagina.wait_for_load_state("domcontentloaded")
+        if "sca_historico_escolar_novocon.asp" in pagina.url.lower():
+            abrir_disciplinas_registro(pagina, **alvo, timeout_ms=timeout_ms)
+        else:
+            disciplina.wait_for(state="visible", timeout=timeout_ms)
 
     def incluir_enviar_dados(driver): 
         attempts = 3
@@ -1349,6 +1529,7 @@ class SelecionaMateria:
 
     # MÃ©todo para selecionar 1Âº ou 2Âº MOMENTO para EI - EDUCAÃ‡ÃƒO INFANTIL (Agrupamento 4 ou 5)
     def momento_EI_EDUCACAO_INFANTIL(self, momento):
+        FuncoesDoPrograma.garantir_etapa_disciplinas(self.driver)
         global driver
         self.driver = driver
         if _normalizar_rotulo_interface(momento) in {
@@ -1413,6 +1594,7 @@ def processar_disciplinas_ou_registro_minimo(
     ano: Any,
     carga_horaria: Any,
 ) -> None:
+    FuncoesDoPrograma.garantir_etapa_disciplinas(seletor_materia.driver)
     disciplinas_notas = montar_disciplinas_notas_interface(dados)
     cursando = dados.get("cursando", "nao")
     if disciplinas_notas:
@@ -1439,26 +1621,39 @@ class CalendarioEscolar:
             '11': [1, 4, 6, 7, 8, 11, 12, 13, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29],  # Novembro
             '12': [2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 16, 17, 18, 19]  # Dezembro
         }
-        self.data_inicio_aulas = datetime(2024, 1, 22)  # Data de inÃ­cio das aulas
+        dias_2024 = self.dias_letivos_especificos
+        # Fonte: Calendario Escolar 2026.pdf, SME de Aparecida de Goiânia.
+        # Resolução CME nº 109/2025, aprovada em 17/11/2025.
+        # Inclui as atividades que compõem os totais mensais oficiais (201 dias).
+        dias_2026 = {
+            '01': [19, 20, 21, 22, 23, 26, 27, 28, 29, 30],
+            '02': [2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 19, 20, 23, 24, 25, 26, 27],
+            '03': [2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 30, 31],
+            '04': [1, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17, 22, 23, 24, 27, 28, 29, 30],
+            '05': [4, 5, 6, 7, 8, 12, 13, 14, 15, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29],
+            '06': [1, 2, 3, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26, 29, 30],
+            '07': [31],
+            '08': [3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 17, 18, 19, 20, 21, 24, 25, 26, 27, 28, 31],
+            '09': [1, 2, 3, 4, 8, 9, 10, 11, 14, 15, 16, 17, 18, 21, 22, 23, 24, 25, 28, 29, 30],
+            '10': [1, 2, 5, 6, 7, 8, 9, 19, 20, 21, 22, 23, 26, 27, 28, 29, 30],
+            '11': [3, 4, 5, 6, 9, 10, 11, 12, 13, 16, 17, 18, 19, 23, 24, 25, 26, 27, 30],
+            '12': [1, 2, 3, 4, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18],
+        }
+        self.calendarios = {2024: dias_2024, 2026: dias_2026}
+        self.dias_letivos_especificos = dias_2026
+        self.data_inicio_aulas = datetime(2026, 1, 19)
+
+    def dias_do_ano(self, ano):
+        if ano not in self.calendarios:
+            raise ValueError(f'Calendário escolar de {ano} não cadastrado. Informe a carga horária manualmente.')
+        return self.calendarios[ano]
 
     def calcular_dias_letivos(self, data_transferencia):
-        total_dias = 0
-        data_transferencia = datetime.strptime(data_transferencia, '%d/%m/%Y')  # Formato dd/mm/yyyy
-
-        for mes in range(self.data_inicio_aulas.month, data_transferencia.month + 1):
-            mes_str = f"{mes:02d}"
-            if mes == self.data_inicio_aulas.month:
-                # Considerar apenas os dias a partir de 22/01
-                dias_validos = [dia for dia in self.dias_letivos_especificos[mes_str] if dia >= self.data_inicio_aulas.day]
-            elif mes == data_transferencia.month:
-                # Considerar apenas atÃ© o dia de transferÃªncia
-                dias_validos = [dia for dia in self.dias_letivos_especificos[mes_str] if dia <= data_transferencia.day]
-            else:
-                dias_validos = self.dias_letivos_especificos[mes_str]
-
-            total_dias += len(dias_validos)
-
-        return total_dias
+        fim = datetime.strptime(data_transferencia, '%d/%m/%Y')
+        return sum(
+            datetime(fim.year, int(mes), dia) <= fim
+            for mes, dias in self.dias_do_ano(fim.year).items() for dia in dias
+        )
 
 DISCIPLINAS_TABELA = [
     "ARTES",
@@ -2421,7 +2616,7 @@ def carregar_rel_aluno_csv(caminho_csv: str) -> List[Dict[str, str]]:
 
         for campo in campos:
             campo_norm = normalizar_texto_busca(campo).replace(" ", "_")
-            if "MATRICULA" in campo_norm and "matricula" not in mapa_campos:
+            if campo_norm in {"MATRICULA", "NUMERO_MATRICULA", "RA"} and "matricula" not in mapa_campos:
                 mapa_campos["matricula"] = campo
             elif campo_norm in {"NOME", "NOME_ALUNO", "NOME_DO_ALUNO", "ALUNO"} and "nome_aluno" not in mapa_campos:
                 mapa_campos["nome_aluno"] = campo
@@ -2435,6 +2630,20 @@ def carregar_rel_aluno_csv(caminho_csv: str) -> List[Dict[str, str]]:
                 mapa_campos["pai"] = campo
             elif campo_norm == "MAE" and "mae" not in mapa_campos:
                 mapa_campos["mae"] = campo
+
+        for campo in campos:
+            chave = normalizar_texto_busca(campo).replace(" ", "_")
+            aliases = {
+                "DATA_MATRICULA": "data_matricula", "DATA_DA_MATRICULA": "data_matricula",
+                "DATA_DE_MATRICULA": "data_matricula", "DATA_AFASTAMENTO": "data_afastamento",
+                "DATA_DE_AFASTAMENTO": "data_afastamento", "DATA_DO_AFASTAMENTO": "data_afastamento",
+                "TURMA": "turma", "SITUACAO": "situacao", "SITUACAO_DO_ALUNO": "situacao",
+                "TELEFONE_CELULAR": "telefone_celular", "TELEFONE_COMERCIAL": "telefone_comercial",
+                "TELEFONE_RESIDENCIAL": "telefone_residencial",
+                "TELEFONE_RESPONSAVEL": "telefone_responsavel", "TELEFONE_DO_RESPONSAVEL": "telefone_responsavel",
+            }
+            if chave in aliases:
+                mapa_campos[aliases[chave]] = campo
 
         if "matricula" not in mapa_campos or "nome_aluno" not in mapa_campos:
             raise ValueError(
@@ -2452,6 +2661,9 @@ def carregar_rel_aluno_csv(caminho_csv: str) -> List[Dict[str, str]]:
                 "pai": str((linha.get(mapa_campos.get("pai", "")) or "")).strip() if mapa_campos.get("pai") else "",
                 "mae": str((linha.get(mapa_campos.get("mae", "")) or "")).strip() if mapa_campos.get("mae") else "",
             }
+            for chave in ("data_matricula", "data_afastamento", "turma", "situacao",
+                          "telefone_celular", "telefone_comercial", "telefone_residencial", "telefone_responsavel"):
+                registro[chave] = str(linha.get(mapa_campos.get(chave, "")) or "").strip()
             if registro["matricula"] or registro["nome_aluno"]:
                 registros.append(registro)
 
@@ -3462,6 +3674,8 @@ def garantir_sessao_gemul(numero_matricula: str = "", force_reabrir_tela: bool =
 
 def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     numero_matricula = re.sub(r"\D", "", str(dados.get("numero_matricula", "") or "").strip())
+    if dados.get("deve_historico") or matricula_deve_historico(numero_matricula):
+        raise ValueError("Aluno com historico pendente. Gere a cobranca do documento antes de continuar os lancamentos.")
     driver_ativo = garantir_sessao_gemul(numero_matricula)
 
     serie_bruta = str(dados.get("serie", "") or "").strip()
@@ -3484,8 +3698,22 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     print(f"UF: {uf}")
     print(f"Carga Horaria: {carga_horaria}")
 
+    sessao_execucao["historico_alvo"] = dict(ano=ano, serie=serie, escola=nome_escola)
+    registrar_etapa_historico("inicio_lancamento", _get_base(driver_ativo),
+                             matricula=numero_matricula, **sessao_execucao["historico_alvo"])
     inicio_lancamento = time.time()
-
+    pagina = _get_base(driver_ativo)
+    pagina.goto(f"{GEMUL_HISTORICO_URL}?txtMatricula={numero_matricula}", wait_until="domcontentloaded")
+    pagina.locator('#txtMatricula').wait_for(state="visible", timeout=15000)
+    if pagina.locator('#txtMatricula').input_value().strip() != numero_matricula:
+        raise RuntimeError('A matrícula exibida no GEMUL não corresponde à matrícula informada. Lançamento bloqueado.')
+    pagina.locator('#btnIncluir').wait_for(state="attached", timeout=15000)
+    linhas = pagina.locator('tr').filter(has=pagina.locator('button[onclick*="editarDisciplinas"]'))
+    registros = linhas.evaluate_all("rows => rows.map(row => Array.from(row.cells).map(cell => cell.innerText.trim()))")
+    indice = indice_registro_historico(registros, ano, serie, nome_escola)
+    if indice is not None:
+        registrar_etapa_historico("duplicacao_bloqueada", pagina, ano=ano, serie=serie, escola=nome_escola)
+        return f"Registro já existente: {ano}, {serie}, {nome_escola}. Nenhum dado foi incluído."
     if serie == "AGRUPAMENTO 4":
         SerieEscolhida.agrupamento4(driver_ativo, ano, nome_escola, cidade, ja_estudou, ficha_descritiva, txt_observacoes, serie, carga_horaria, cursando, dados.get("txt_observacoes_gerais", ""))
     elif serie == "AGRUPAMENTO 5":
@@ -3505,6 +3733,7 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
 
     duracao = formatar_duracao(time.time() - inicio_lancamento)
     mensagem = f"Lancamento concluido para {serie} em {duracao}."
+    registrar_etapa_historico("concluido", pagina, ano=ano, serie=serie, duracao=duracao)
     print(mensagem)
     Atalho.alerta_sonoro()
     return mensagem
@@ -3539,12 +3768,14 @@ def obter_matricula():
     uf_var = tk.StringVar(value=UF_ESCOLA_PADRAO)
     serie_var = tk.StringVar()
     carga_horaria_var = tk.StringVar()
+    data_matricula_var = tk.StringVar()
     data_transferencia_var = tk.StringVar()
     ja_estudou_var = tk.BooleanVar()
     ficha_descritiva_var = tk.BooleanVar()
     cursando_var = tk.BooleanVar()
     observacoes_var = tk.BooleanVar()
     deve_historico_var = tk.BooleanVar()
+    gerar_cobranca_var = tk.BooleanVar()
     txt_observacoes_var = tk.StringVar()
     marcar_disciplinas_var = tk.BooleanVar()
     nome_aluno_var = tk.StringVar()
@@ -3632,6 +3863,11 @@ def obter_matricula():
         ano = extrair_ano_4_digitos(ano_var.get())
 
         if cidade_norm == "APARECIDA DE GOIANIA":
+            if ano == "2026":
+                horas_por_dia = (4 if serie_norm in {"AGRUPAMENTO 4", "AGRUPAMENTO 5"}
+                                 else 5 if serie_fundamental_1a5(serie_norm) else 0)
+                total_dias = calendario_escolar.calcular_dias_letivos('31/12/2026')
+                return str(total_dias * horas_por_dia) if horas_por_dia else ""
             if serie_norm in {"AGRUPAMENTO 4", "AGRUPAMENTO 5"}:
                 return "759" if ano == "2020" else "800"
             if serie_fundamental_1a5(serie_norm):
@@ -3678,6 +3914,7 @@ def obter_matricula():
             dados_formulario["ano"],
             "sim" if cursando_var.get() else "nao",
         )
+        dados_formulario["data_matricula"] = data_matricula_var.get()
         dados_formulario["carga_horaria"] = carga_horaria_var.get()
         dados_formulario["data_transferencia"] = data_transferencia_var.get()
         dados_formulario["ja_estudou"] = "sim" if ja_estudou_var.get() else "nao"
@@ -3745,6 +3982,13 @@ def obter_matricula():
                 parent=root,
             )
             return
+        if deve_historico_var.get() or matricula_deve_historico(numero_matricula):
+            messagebox.showinfo(
+                "Histórico pendente",
+                "Este aluno deve histórico escolar. Os lançamentos estão bloqueados até a regularização. "
+                "Use a opção Gerar cobrança de histórico para preparar a solicitação.", parent=root,
+            )
+            return
         if not str(dados_formulario.get("serie", "") or "").strip():
             messagebox.showwarning("Serie", "Informe a serie antes de lancar.", parent=root)
             return
@@ -3779,6 +4023,7 @@ def obter_matricula():
             mensagem = executar_lancamento_historico(dados_formulario)
         except Exception as exc:
             traceback.print_exc()
+            registrar_etapa_historico("falha", _get_base(driver), erro=str(exc), alvo=sessao_execucao.get("historico_alvo"))
             erro_texto = str(exc)
             status_scan_var.set(f"Falha no lancamento: {erro_texto}. Sessao mantida para nova tentativa.")
             messagebox.showerror(
@@ -3789,6 +4034,8 @@ def obter_matricula():
             )
         else:
             status_scan_var.set(mensagem)
+            if mensagem.startswith('Registro já existente:'):
+                messagebox.showinfo('Lançamento já cadastrado', mensagem, parent=root)
         finally:
             lancamento_em_andamento["ativo"] = False
             if botao_ok is not None:
@@ -3799,9 +4046,16 @@ def obter_matricula():
                 pass
 
     def on_transfer_date_change(*_args):
+        if bloqueio_auto["ativo"]:
+            return
         data_transferencia = data_transferencia_var.get().strip()
         if data_transferencia and validar_data(data_transferencia):
-            total_dias = calendario_escolar.calcular_dias_letivos(data_transferencia)
+            try:
+                total_dias = calendario_escolar.calcular_dias_letivos(data_transferencia)
+            except ValueError as exc:
+                carga_horaria_var.set('')
+                status_scan_var.set(str(exc))
+                return
             serie_norm = normalizar_texto_busca(serie_var.get())
             horas_por_dia = 4 if serie_norm in {"AGRUPAMENTO 4", "AGRUPAMENTO 5"} else 5 if serie_fundamental_1a5(serie_norm) else 0
             carga_horaria_var.set(str(total_dias * horas_por_dia) if horas_por_dia else "")
@@ -3894,6 +4148,61 @@ def obter_matricula():
         else:
             consulta_matricula_estado["ultimo_alerta_deve_historico"] = ""
             status_scan_var.set(f"Matricula {matricula} desmarcada como devedor de historico.")
+
+    def abrir_cobranca_historico():
+        if not gerar_cobranca_var.get():
+            return
+        try:
+            texto = gerar_texto_cobranca_historico(coletar_dados_formulario())
+        except ValueError as exc:
+            gerar_cobranca_var.set(False)
+            messagebox.showwarning('Cobrança de histórico', str(exc), parent=root)
+            return
+        janela = tk.Toplevel(root)
+        janela.title('Cobrança de histórico — revisar e copiar')
+        janela.geometry('760x460')
+        campo = tk.Text(janela, wrap='word', padx=12, pady=12)
+        campo.pack(fill='both', expand=True)
+        campo.insert('1.0', texto)
+        botoes = ttk.Frame(janela)
+        botoes.pack(fill='x', padx=10, pady=10)
+
+        def copiar():
+            try:
+                root.clipboard_clear()
+                root.clipboard_append(campo.get('1.0', 'end-1c'))
+            except tk.TclError:
+                aviso_copia.set('Não foi possível copiar. Selecione o texto e pressione Ctrl+C.')
+            else:
+                aviso_copia.set('Texto copiado automaticamente. Use Ctrl+V para colar.')
+            status_scan_var.set(aviso_copia.get())
+
+        aviso_copia = tk.StringVar()
+        ttk.Label(janela, textvariable=aviso_copia).pack(fill='x', padx=15, pady=5)
+        copiar()
+
+        def salvar():
+            destino = filedialog.asksaveasfilename(
+                parent=janela, title='Salvar cobrança', defaultextension='.txt',
+                initialfile=f'cobranca_historico_{numero_matricula_var.get()}.txt',
+                filetypes=[('Texto', '*.txt')],
+            )
+            if destino:
+                try:
+                    with open(destino, 'w', encoding='utf-8') as arquivo:
+                        arquivo.write(campo.get('1.0', 'end-1c'))
+                except OSError as exc:
+                    messagebox.showerror('Cobrança', f'Não foi possível salvar: {exc}', parent=janela)
+
+        ttk.Button(botoes, text='Copiar texto', command=copiar).pack(side='left', padx=5)
+        ttk.Button(botoes, text='Salvar texto...', command=salvar).pack(side='left', padx=5)
+        ttk.Button(botoes, text='Fechar', command=janela.destroy).pack(side='right', padx=5)
+        janela.protocol('WM_DELETE_WINDOW', janela.destroy)
+        def ao_fechar(event):
+            if event.widget == janela:
+                gerar_cobranca_var.set(False)
+        janela.bind('<Destroy>', ao_fechar)
+        registrar_etapa_historico('cobranca_gerada', matricula=numero_matricula_var.get())
 
     def on_observacoes_text_change(_event=None):
         texto = obter_texto_observacoes()
@@ -4085,12 +4394,14 @@ def obter_matricula():
             uf_var.set(UF_ESCOLA_PADRAO)
             serie_var.set("")
             carga_horaria_var.set("")
+            data_matricula_var.set("")
             data_transferencia_var.set("")
             ja_estudou_var.set(False)
             ficha_descritiva_var.set(False)
             cursando_var.set(False)
             observacoes_var.set(False)
             deve_historico_var.set(False)
+            gerar_cobranca_var.set(False)
             marcar_disciplinas_var.set(False)
             definir_texto_observacoes("")
             definir_texto_observacoes_gerais("")
@@ -4139,6 +4450,30 @@ def obter_matricula():
         cache_rel_aluno["registros"] = registros
         return registros
 
+    def aplicar_cadastro_matricula(matricula):
+        registros = [r for r in carregar_base_rel_aluno()
+                     if r["matricula"] == matricula
+                     and normalizar_texto_busca(r["nome_aluno"]) == normalizar_texto_busca(nome_aluno_var.get())]
+        # Avoid choosing a class or enrollment period arbitrarily.
+        if len(registros) != 1:
+            return False
+        registro = registros[0]
+        entrada = registro.get("data_matricula", "")
+        saida = registro.get("data_afastamento", "")
+        entrada = entrada if validar_data(entrada) else ""
+        saida = saida if validar_data(saida) else ""
+        bloqueio_auto["ativo"] = True
+        try:
+            data_matricula_var.set(entrada)
+            data_transferencia_var.set(saida)
+            ano_var.set((saida or entrada)[-4:])
+            serie_var.set(normalizar_serie(registro.get("turma", "")))
+            cursando_var.set(not saida and normalizar_texto_busca(registro.get("situacao", "")) == "ATIVO")
+        finally:
+            bloqueio_auto["ativo"] = False
+        on_transfer_date_change()
+        return True
+
     def _valor_booleano_persistido(valor: Any) -> bool:
         if isinstance(valor, bool):
             return valor
@@ -4176,6 +4511,7 @@ def obter_matricula():
             aplicar_dados_escola_padrao()
             serie_var.set(str(dados_cache.get("serie", "") or "").strip())
             carga_horaria_var.set(str(dados_cache.get("carga_horaria", "") or "").strip())
+            data_matricula_var.set(str(dados_cache.get("data_matricula", "") or "").strip())
             data_transferencia_var.set(str(dados_cache.get("data_transferencia", "") or "").strip())
 
             ja_estudou_var.set(_valor_booleano_persistido(dados_cache.get("ja_estudou", False)))
@@ -4208,10 +4544,13 @@ def obter_matricula():
                 var.set(str(dados_cache.get(disciplina, "") or "").strip())
 
             mostrar_disciplinas()
-            if not str(dados_cache.get("carga_horaria", "") or "").strip():
-                on_transfer_date_change()
         finally:
             bloqueio_auto["ativo"] = False
+
+        if (validar_data(data_transferencia_var.get()) or not carga_horaria_var.get().strip()
+                or (ano_var.get() == '2026'
+                    and normalizar_texto_busca(cidade_var.get()) == 'APARECIDA DE GOIANIA')):
+            on_transfer_date_change()
 
         salvo_em = str(payload_cache.get("salvo_em", "") or "").strip()
         if atualizar_status:
@@ -4391,6 +4730,11 @@ def obter_matricula():
                 matricula_digitada,
                 atualizar_status=atualizar_status,
             )
+        if not cache_restaurado:
+            try:
+                cache_restaurado = aplicar_cadastro_matricula(matricula_digitada)
+            except Exception as exc:
+                status_scan_var.set(f"Falha ao carregar cadastro escolar: {exc}")
         if not avisou_devedor:
             avisar_devedor_historico(
                 matricula_digitada,
@@ -4408,6 +4752,33 @@ def obter_matricula():
 
     def on_matricula_focus_out(_event=None):
         consultar_matricula_digitada(exibir_alertas=False, atualizar_status=True)
+
+    def atualizar_base_alunos(forcar=False):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if not forcar and base_atualizada_hoje(base_dir):
+            return
+        status_scan_var.set("Atualizando lista de alunos no GEMUL...")
+        root.update_idletasks()
+        try:
+            verificar_espaco(base_dir)
+            pagina = _get_base(garantir_sessao_gemul())
+            total = atualizar_base_diaria(pagina, base_dir, forcar=forcar)
+            cache_csv.update(matriculas=None, nomes=None)
+            cache_rel_aluno["registros"] = None
+            consulta_matricula_estado["ultima_consultada"] = ""
+            status_scan_var.set(f"Base atualizada: {total} registros de alunos.")
+        except Exception as exc:
+            mensagem = str(exc)
+            if "Target page, context or browser has been closed" in mensagem:
+                mensagem = "O navegador foi fechado durante a atualizacao. Use RECUPERAR GEMUL e tente novamente."
+            elif isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+                mensagem = "O disco ficou sem espaco durante a atualizacao. Libere espaco e tente novamente."
+            status_scan_var.set(f"Base nao atualizada: {mensagem}")
+            messagebox.showwarning(
+                "Atualizacao de alunos",
+                f"Nao foi possivel atualizar a lista. A base anterior foi preservada.\n{mensagem}\n"
+                "Use ATUALIZAR ALUNOS para tentar novamente.", parent=root,
+            )
 
     def solicitar_matricula_inicial() -> bool:
         while True:
@@ -4967,6 +5338,10 @@ def obter_matricula():
         entry_widget.grid_remove()
         disciplina_widgets.append((label_widget, entry_widget))
 
+    ttk.Checkbutton(root, text='Gerar cobrança de histórico', variable=gerar_cobranca_var,
+                    command=abrir_cobranca_historico).grid(
+        row=18, column=0, columnspan=2, padx=10, pady=5, sticky='w')
+
     def encerrar_aplicacao():
         monitoramento_navegador["ativo"] = False
         monitoramento_navegador["encerrando"] = True
@@ -5014,8 +5389,15 @@ def obter_matricula():
     ttk.Button(root, text="CANCELAR", command=encerrar_aplicacao).grid(row=21, column=2, columnspan=2, pady=10)
     ttk.Button(root, text="RECUPERAR GEMUL", command=recuperar_gemul).grid(row=21, column=4, columnspan=2, pady=10)
     ttk.Button(root, text="RESET", command=resetar_formulario).grid(row=22, column=0, columnspan=6, pady=(0, 10))
+    ttk.Button(root, text="ATUALIZAR ALUNOS", command=lambda: atualizar_base_alunos(forcar=True)).grid(
+        row=23, column=0, columnspan=6, pady=(0, 10))
     root.protocol("WM_DELETE_WINDOW", encerrar_aplicacao)
 
+    entrada_frame = ttk.Frame(root)
+    entrada_frame.grid(row=7, column=1, padx=10, pady=5, sticky="we")
+    ttk.Label(entrada_frame, text="Entrada:").pack(side="left")
+    ttk.Entry(entrada_frame, textvariable=data_matricula_var, width=12).pack(side="left", fill="x", expand=True)
+    data_matricula_var.trace_add("write", on_transfer_date_change)
     data_transferencia_var.trace_add("write", on_transfer_date_change)
     nome_escola_var.trace_add("write", on_escola_change)
     cidade_var.trace_add("write", on_cidade_change)
@@ -5031,12 +5413,19 @@ def obter_matricula():
 
     carregar_arquivos_historico_automaticamente(solicitar_recorte=False)
 
+    atualizar_base_alunos()
+
     if not solicitar_matricula_inicial():
         root.destroy()
         return dados
 
     if not aplicar_cache_formulario_da_matricula(numero_matricula_var.get(), atualizar_status=True):
         aplicar_cache_historico_da_matricula(numero_matricula_var.get(), atualizar_status=True)
+    if not ano_var.get() or not serie_var.get():
+        try:
+            aplicar_cadastro_matricula(numero_matricula_var.get())
+        except Exception as exc:
+            status_scan_var.set(f"Falha ao carregar cadastro escolar: {exc}")
     avisar_devedor_historico(
         numero_matricula_var.get(),
         exibir_alertas=True,
@@ -5192,23 +5581,23 @@ class ProcessamentoDeObservacoes:
         observacoes = corrigir_texto_utf8(observacoes)
         serie = corrigir_texto_utf8(serie)
         
-        # CondiÃ§Ã£o para ano menor que 2019
+        # Condição para ano menor que 2019
         if ano < 2019:
             texto = self.processa_ano_menor_2019(escola, cidade, ja_estudou, ficha_descritiva, observacoes)
 
-        # CondiÃ§Ã£o para ano igual a 2020
+        # Condição para ano igual a 2020
         elif ano == 2020:
             texto = self.processa_ano_2020(escola, cidade, ja_estudou, ficha_descritiva, observacoes)
 
-        # CondiÃ§Ã£o para ano igual a 2021
+        # Condição para ano igual a 2021
         elif ano == 2021:
             texto = self.processa_ano_2021(escola, cidade, ja_estudou, ficha_descritiva, observacoes)
 
-        # CondiÃ§Ã£o para o ano corrente
+        # Condição para o ano corrente
         elif ano == ano_corrente:
             texto = self.processa_ano_corrente(escola, cidade, ja_estudou, ficha_descritiva, observacoes, serie)
 
-        # CondiÃ§Ã£o para qualquer outro ano
+        # Condição para qualquer outro ano
         else:
             texto = self.processa_ano_padrao(escola, cidade, ja_estudou, ficha_descritiva, observacoes)
 
@@ -5218,212 +5607,212 @@ class ProcessamentoDeObservacoes:
         return self._aplicar_observacao_agrupamento_aparecida(texto, serie, escola, cidade)
     
     def processa_ano_menor_2019(self, escola, cidade, ja_estudou, ficha_descritiva, observacoes):
-        # CondiÃ§Ã£o 1: Se 'escola' for 'ESCOLA MUNICIPAL JARDIM BELA VISTA'
+        # Condição 1: Se 'escola' for 'ESCOLA MUNICIPAL JARDIM BELA VISTA'
         if escola == "ESCOLA MUNICIPAL JARDIM BELA VISTA":
             if ja_estudou == "nao":
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o Normativa 005/07 CME de Aparecida de GoiÃ¢nia-GO. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução Normativa 005/07 CME de Aparecida de Goiânia-GO. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o Normativa 005/07 CME de Aparecida de GoiÃ¢nia-GO."
+                    return "Aluno(a) avaliado(a) conforme a Resolução Normativa 005/07 CME de Aparecida de Goiânia-GO."
             else:  # ja_estudou == "sim"
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o Normativa 005/07 CME. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução Normativa 005/07 CME. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o Normativa 005/07 CME de Aparecida de GoiÃ¢nia-GO."
+                    return "Aluno(a) avaliado(a) conforme a Resolução Normativa 005/07 CME de Aparecida de Goiânia-GO."
         
         else:
             if cidade == "APARECIDA DE GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o Normativa 005/07 CME de Aparecida de GoiÃ¢nia-GO. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução Normativa 005/07 CME de Aparecida de Goiânia-GO. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o Normativa 005/07 CME de Aparecida de GoiÃ¢nia-GO. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução Normativa 005/07 CME de Aparecida de Goiânia-GO. Histórico transcrito conforme o original."
                 else:  # ja_estudou == "sim"
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 005/07. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução 005/07. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 005/07. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução 005/07. Histórico transcrito conforme o original."
             
             elif cidade == "GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return ("Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada "
-                                "atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. HistÃ³rico transcrito conforme o original.")
+                        return ("Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada "
+                                "através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Histórico transcrito conforme o original.")
                     else:
-                        return "Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano. Histórico transcrito conforme o original."
                 else:  # ja_estudou == "sim"
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266. Histórico transcrito conforme o original."
             
             else:  # cidade != "GOIANIA"
-                if observacoes:  # Verifica se observacoes Ã© True
-                    return f"{observacoes} HistÃ³rico transcrito conforme o original."
+                if observacoes:  # Verifica se observacoes é True
+                    return f"{observacoes} Histórico transcrito conforme o original."
         
-        return "Nenhuma observaÃ§Ã£o. HistÃ³rico transcrito conforme o original"
+        return "Nenhuma observação. Histórico transcrito conforme o original"
 
-    # MÃ©todos placeholders para os outros anos, a serem implementados conforme necessÃ¡rio
+    # Métodos placeholders para os outros anos, a serem implementados conforme necessário
     def processa_ano_2020(self, escola, cidade, ja_estudou, ficha_descritiva, observacoes):
         if escola == "ESCOLA MUNICIPAL JARDIM BELA VISTA":
             if ja_estudou == "nao":
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia."
             else:
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia."
         else:
             if cidade == "APARECIDA DE GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia. Histórico transcrito conforme o original."
                 else:
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. Aprovado(a) conforme ResoluÃ§Ã£o CME nÂº 014, de 01 de outubro de 2020, que dispÃµe sobre a aprovaÃ§Ã£o automÃ¡tica dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de GoiÃ¢nia. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Aprovado(a) conforme Resolução CME nº 014, de 01 de outubro de 2020, que dispõe sobre a aprovação automática dos alunos devidamente matriculados na Rede Municipal de Ensino de Aparecida de Goiânia. Histórico transcrito conforme o original."
             elif cidade == "GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Histórico transcrito conforme o original."
                 else:
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original."
             else:
                 if observacoes:
-                    return f"{observacoes} HistÃ³rico transcrito conforme o original."
-        return "Nenhuma observaÃ§Ã£o. HistÃ³rico transcrito conforme o original."
+                    return f"{observacoes} Histórico transcrito conforme o original."
+        return "Nenhuma observação. Histórico transcrito conforme o original."
 
     def processa_ano_2021(self, escola, cidade, ja_estudou, ficha_descritiva, observacoes):
         if escola == "ESCOLA MUNICIPAL JARDIM BELA VISTA":
             if ja_estudou == "nao":
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia."
             else:
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o 011/2019. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução 011/2019. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o 011/2019."
+                    return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução 011/2019."
         else:
             if cidade == "APARECIDA DE GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Histórico transcrito conforme o original."
                 else:
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o 011/2019. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução 011/2019. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o nÂº 004/2020 DispÃµe sobre o regime especial de aulas nÃ£o presenciais (REANP) no Sistema de Ensino do municÃ­pio de Aparecida de GoiÃ¢nia, como medida preventiva Ã  disseminaÃ§Ã£o do COVID-19. ResoluÃ§Ã£o 011/2019. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução nº 004/2020 Dispõe sobre o regime especial de aulas não presenciais (REANP) no Sistema de Ensino do município de Aparecida de Goiânia, como medida preventiva à disseminação do COVID-19. Resolução 011/2019. Histórico transcrito conforme o original."
             elif cidade == "GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08, compreendendo os perÃ­odos da infÃ¢ncia = Ciclo I / prÃ©-adolescÃªncia = Ciclo II / adolescÃªncia = Ciclo III. Componentes curriculares: Arte, CiÃªncia, EducaÃ§Ã£o FÃ­sica, Geografia, HistÃ³ria, LÃ­ngua Estrangeira Moderna InglÃªs, LÃ­ngua Portuguesa e MatemÃ¡tica. Carga horÃ¡ria anual: 800 / dias letivos: 200. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08, compreendendo os períodos da infância = Ciclo I / pré-adolescência = Ciclo II / adolescência = Ciclo III. Componentes curriculares: Arte, Ciência, Educação Física, Geografia, História, Língua Estrangeira Moderna Inglês, Língua Portuguesa e Matemática. Carga horária anual: 800 / dias letivos: 200. Nos ciclos, a avaliação é descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08, compreendendo os perÃ­odos da infÃ¢ncia = Ciclo I / prÃ©-adolescÃªncia = Ciclo II / adolescÃªncia = Ciclo III. Componentes curriculares: Arte, CiÃªncia, EducaÃ§Ã£o FÃ­sica, Geografia, HistÃ³ria, LÃ­ngua Estrangeira Moderna InglÃªs, LÃ­ngua Portuguesa e MatemÃ¡tica. Carga horÃ¡ria anual: 800 / dias letivos: 200. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08, compreendendo os períodos da infância = Ciclo I / pré-adolescência = Ciclo II / adolescência = Ciclo III. Componentes curriculares: Arte, Ciência, Educação Física, Geografia, História, Língua Estrangeira Moderna Inglês, Língua Portuguesa e Matemática. Carga horária anual: 800 / dias letivos: 200. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original."
                 else:
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original."
             else:
                 if observacoes:
-                    return f"{observacoes} HistÃ³rico transcrito conforme o original."
-        return "Nenhuma observaÃ§Ã£o. HistÃ³rico transcrito conforme o original."
+                    return f"{observacoes} Histórico transcrito conforme o original."
+        return "Nenhuma observação. Histórico transcrito conforme o original."
 
     def processa_ano_corrente(self, escola, cidade, ja_estudou, ficha_descritiva, observacoes, serie):
         if escola == "ESCOLA MUNICIPAL JARDIM BELA VISTA":
             if ja_estudou == "nao":
                 if ficha_descritiva == "sim":
-                    return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                    return f"Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                 else:
-                    return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                    return f"Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
             else:
                 if ficha_descritiva == "sim":
-                    return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                    return f"Aluno(a) avaliado(a) conforme a Resolução 011/2019. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                 else:
-                    return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                    return f"Aluno(a) avaliado(a) conforme a Resolução 011/2019. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
         else:
             if cidade == "APARECIDA DE GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                     else:
-                        return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                 else:
                     if ficha_descritiva == "sim":
-                        return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Resolução 011/2019. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                     else:
-                        return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Resolução 011/2019. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
             elif cidade == "GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return f"Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08, compreendendo os perÃ­odos da infÃ¢ncia = Ciclo I / prÃ©-adolescÃªncia = Ciclo II / adolescÃªncia = Ciclo III. Componentes curriculares: Arte, CiÃªncia, EducaÃ§Ã£o FÃ­sica, Geografia, HistÃ³ria, LÃ­ngua Estrangeira Moderna InglÃªs, LÃ­ngua Portuguesa e MatemÃ¡tica. Carga horÃ¡ria anual: 800 / dias letivos: 200. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, em anexo. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08, compreendendo os períodos da infância = Ciclo I / pré-adolescência = Ciclo II / adolescência = Ciclo III. Componentes curriculares: Arte, Ciência, Educação Física, Geografia, História, Língua Estrangeira Moderna Inglês, Língua Portuguesa e Matemática. Carga horária anual: 800 / dias letivos: 200. Nos ciclos, a avaliação é descritiva, em anexo. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                     else:
-                        return f"Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08, compreendendo os perÃ­odos da infÃ¢ncia = Ciclo I / prÃ©-adolescÃªncia = Ciclo II / adolescÃªncia = Ciclo III. Componentes curriculares: Arte, CiÃªncia, EducaÃ§Ã£o FÃ­sica, Geografia, HistÃ³ria, LÃ­ngua Estrangeira Moderna InglÃªs, LÃ­ngua Portuguesa e MatemÃ¡tica. Carga horÃ¡ria anual: 800 / dias letivos: 200. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08, compreendendo os períodos da infância = Ciclo I / pré-adolescência = Ciclo II / adolescência = Ciclo III. Componentes curriculares: Arte, Ciência, Educação Física, Geografia, História, Língua Estrangeira Moderna Inglês, Língua Portuguesa e Matemática. Carga horária anual: 800 / dias letivos: 200. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                 else:
                     if ficha_descritiva == "sim":
-                        return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, em anexo. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, em anexo. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
                     else:
-                        return f"Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                        return f"Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
             else:
                 if observacoes:
-                    return f"{observacoes} HistÃ³rico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
-        return f"Texto padrÃ£o para o ano corrente. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+                    return f"{observacoes} Histórico transcrito conforme o original. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
+        return f"Texto padrão para o ano corrente. Aluno(a) apto(a) a dar continuidade aos estudos no {serie}."
 
     def processa_ano_padrao(self, escola, cidade, ja_estudou, ficha_descritiva, observacoes):
         if escola == "ESCOLA MUNICIPAL JARDIM BELA VISTA":
             if ja_estudou == "nao":
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia."
+                    return "Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia."
             else:
                 if ficha_descritiva == "sim":
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo."
+                    return "Aluno(a) avaliado(a) conforme a Resolução 011/2019. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo."
                 else:
-                    return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019."
+                    return "Aluno(a) avaliado(a) conforme a Resolução 011/2019."
         else:
             if cidade == "APARECIDA DE GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o CME nÂº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da EducaÃ§Ã£o BÃ¡sica e procedimentos para credenciamento, recredenciamento, autorizaÃ§Ã£o e renovaÃ§Ã£o de funcionamento de instituiÃ§Ãµes educacionais do Sistema Municipal de Ensino de Aparecida de GoiÃ¢nia. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução CME nº. 011, de 25 de novembro de 2019, que estabelece diretrizes e normas para as etapas e modalidades da Educação Básica e procedimentos para credenciamento, recredenciamento, autorização e renovação de funcionamento de instituições educacionais do Sistema Municipal de Ensino de Aparecida de Goiânia. Histórico transcrito conforme o original."
                 else:
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. Aluno(a) avaliado(a) atravÃ©s de Ficha Descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução 011/2019. Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ã£o 011/2019. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resolução 011/2019. Histórico transcrito conforme o original."
             elif cidade == "GOIANIA":
                 if ja_estudou == "nao":
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29-05-98 e CME/GoiÃ¢nia nÂº 1240/08."  # Alterei as barras
+                        return "Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29-05-98 e CME/Goiânia nº 1240/08."  # Alterei as barras
 
                     else:
-                        return "Sem observaÃ§Ãµes. HistÃ³rico transcrito conforme original" #Aluno(a) avaliado(a) conforme a Proposta pedagÃ³gica Ciclos de FormaÃ§Ã£o e Desenvolvimento Humano, regulamentada atravÃ©s das resoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08, compreendendo os perÃ­odos da infÃ¢ncia = Ciclo I / prÃ©-adolescÃªncia = Ciclo II / adolescÃªncia = Ciclo III. Componentes curriculares: Arte, CiÃªncia, EducaÃ§Ã£o FÃ­sica, Geografia, HistÃ³ria, LÃ­ngua Estrangeira Moderna InglÃªs, LÃ­ngua Portuguesa e MatemÃ¡tica. Carga horÃ¡ria anual: 800 / dias letivos: 200. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original."
+                        return "Sem observações. Histórico transcrito conforme original" #Aluno(a) avaliado(a) conforme a Proposta pedagógica Ciclos de Formação e Desenvolvimento Humano, regulamentada através das resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08, compreendendo os períodos da infância = Ciclo I / pré-adolescência = Ciclo II / adolescência = Ciclo III. Componentes curriculares: Arte, Ciência, Educação Física, Geografia, História, Língua Estrangeira Moderna Inglês, Língua Portuguesa e Matemática. Carga horária anual: 800 / dias letivos: 200. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original."
                 else:
                     if ficha_descritiva == "sim":
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, em anexo. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, em anexo. Histórico transcrito conforme o original."
                     else:
-                        return "Aluno(a) avaliado(a) conforme a ResoluÃ§Ãµes CEE/GO nÂº 266, de 29/05/98 e CME/GoiÃ¢nia nÂº 1240/08. Nos ciclos, a avaliaÃ§Ã£o Ã© descritiva, no entanto tal documento nÃ£o se fez presente anexo ao documento recebido. HistÃ³rico transcrito conforme o original."
+                        return "Aluno(a) avaliado(a) conforme a Resoluções CEE/GO nº 266, de 29/05/98 e CME/Goiânia nº 1240/08. Nos ciclos, a avaliação é descritiva, no entanto tal documento não se fez presente anexo ao documento recebido. Histórico transcrito conforme o original."
             else:
                 if observacoes:
-                    return f"{observacoes} HistÃ³rico transcrito conforme o original."
-        return "Nenhuma observaÃ§Ã£o. HistÃ³rico transcrito conforme o original."
+                    return f"{observacoes} Histórico transcrito conforme o original."
+        return "Nenhuma observação. Histórico transcrito conforme o original."
 
 def escrever_observacoes(driver, ano, nome_escola, cidade, ja_estudou, ficha_descritiva, txt_observacoes, serie, carga_horaria, txt_observacoes_gerais=""):
     # Cria uma instÃ¢ncia da classe ProcessamentoDeObservacoes
@@ -5766,6 +6155,8 @@ class SerieEscolhida:
 # CÃ“DIGO
 if __name__ == "__main__":
     try:
+        if whatsapp_posicao.solicitar_posicao(os.path.dirname(os.path.abspath(__file__))) is None:
+            sys.exit(0)
         obter_matricula()
     except Exception:
         traceback.print_exc()

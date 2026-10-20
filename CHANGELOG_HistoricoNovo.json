@@ -4,6 +4,71 @@
   "orientacao": "Sempre que o codigo for alterado, adicionar uma nova entrada em 'alteracoes' com data, resumo, arquivos e impactos.",
   "alteracoes": [
     {
+      "data": "2026-10-20",
+      "tipo": "consolidacao das melhorias e preparacao para novas funcionalidades",
+      "arquivos": [
+        "main.py",
+        "student_sync.py",
+        "credenciais_locais.py",
+        "whatsapp_posicao.py",
+        "test_student_sync.py",
+        "test_interface_fixes.py",
+        "test_workflow_guards.py",
+        "README.md",
+        ".gitignore"
+      ],
+      "resumo": [
+        "Coleta e preserva os telefones celular, comercial, residencial e do responsavel nos dois CSVs; bases antigas exigem nova atualizacao.",
+        "Solicita a posicao do navegador com WhatsApp a cada abertura antes do login e salva coordenadas localmente.",
+        "Consolida melhorias pendentes de interface, calendario escolar, cobranca de historico, protecoes de fluxo e armazenamento local de credenciais com DPAPI."
+      ],
+      "validacao": [
+        "22 testes automatizados aprovados; verificacao de persistencia de coordenadas e compilacao dos modulos."
+      ],
+      "limitacoes": [
+        "Geracao do relatorio e captura visual do clique ainda requerem validacao interativa."
+      ]
+    },
+    {
+      "data": "2026-10-19",
+      "tipo": "tratamento de disco cheio e navegador fechado",
+      "arquivos": [
+        "main.py",
+        "student_sync.py",
+        "test_student_sync.py"
+      ],
+      "resumo": [
+        "Verifica pelo menos 512 MB livres no volume do projeto e dos temporarios antes de abrir navegador e atualizar.",
+        "Prepara ambos os CSVs e metadados antes de substituir a base, com restauracao por renomeacao dos backups em caso de falha.",
+        "Falhas ao fechar aba de relatorio nao ocultam o erro original; mensagens de navegador fechado e disco cheio em portugues."
+      ],
+      "limitacoes": [
+        "Teste real bloqueado por falta de espaco no disco C:; nao foram apagados dados nem perfis."
+      ]
+    },
+    {
+      "data": "2026-10-19",
+      "tipo": "atualizacao diaria da base de alunos",
+      "arquivos": [
+        "main.py",
+        "student_sync.py",
+        "test_student_sync.py",
+        "requirements.txt",
+        ".gitignore",
+        "README.md"
+      ],
+      "resumo": [
+        "Geracao automatica do relatorio do ano corrente antes da consulta inicial de matricula, com todas as situacoes de escolarizacao.",
+        "Conversao da tabela em CSV, validacao das colunas, backup local e registro diario apenas apos sucesso.",
+        "Botao para atualizacao manual e limpeza dos caches em memoria.",
+        "Credenciais fixas removidas do login; uso de variaveis de ambiente ou dialogos."
+      ],
+      "limitacoes": [
+        "Requer teste autenticado do layout da tabela gerada; HTML fornecido contem somente o formulario.",
+        "Nao consulta anos anteriores nem turmas AEE."
+      ]
+    },
+    {
       "data": "2026-10-19",
       "tipo": "organizacao do projeto ScholarFlow",
       "arquivos": [
