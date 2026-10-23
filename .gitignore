@@ -23,6 +23,7 @@ cache_*/
 *.log
 curso_coords.json
 whatsapp_posicao.json
+cobranca_contatos_utilizados.json
 # Credentials and local settings
 gemul_credenciais.dpapi
 gemul_credenciais.tmp

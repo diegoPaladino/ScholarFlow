@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import credenciais_locais
+import student_transfer
 from student_sync import normalizar
 
 
@@ -20,13 +21,21 @@ class WorkflowTests(unittest.TestCase):
         nodes = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
         self.page = Mock()
         self.page.locator.return_value.input_value.return_value = '202654726'
+        self.page.locator.return_value.count.return_value = 0
         self.env = dict(Dict=Dict, Any=Any, re=re, datetime=datetime, time=Mock(time=Mock(return_value=1)),
+                        student_transfer=student_transfer,
+                        localizar_csv_rel_aluno=lambda: 'base-teste.csv',
+                        carregar_rel_aluno_csv=Mock(return_value=[dict(matricula='202654726',
+                            nome_aluno='ALUNA TESTE', situacao='TRANSFERIDO')]),
                         normalizar_texto_busca=normalizar, ORDINAL_INDICATOR=chr(186),
                         normalizar_cursando_por_ano=lambda *args: 'nao',
                         matricula_deve_historico=Mock(return_value=False),
                         garantir_sessao_gemul=Mock(return_value=self.page),
                         exigir_ano_4_digitos=lambda ano: ano,
                         _get_base=lambda page: page, registrar_etapa_historico=Mock(),
+                        abrir_disciplinas_registro=Mock(), disciplinas_historico=Mock(),
+                        montar_disciplinas_notas_interface=lambda dados: {},
+                        cadastrar_disciplinas_com_extras=lambda pagina, ano, dados: self.env["disciplinas_historico"].cadastrar(pagina, ano, notas={}),
                         sessao_execucao={}, UF_ESCOLA_PADRAO='GO', ESCOLA_PADRAO='ESCOLA A',
                         GEMUL_HISTORICO_URL='https://example.test/app/sca_historico_escolar_novoCon.asp',
                         SerieEscolhida=Mock(), Atalho=Mock(), formatar_duracao=lambda value: '00:01')
@@ -54,6 +63,17 @@ class WorkflowTests(unittest.TestCase):
                 self.env['executar_lancamento_historico'](data)
         self.env['garantir_sessao_gemul'].assert_not_called()
 
+    def test_existing_header_resumes_missing_disciplines_without_new_header(self):
+        self.page.locator.return_value.filter.return_value.evaluate_all.return_value = [
+            ['2026', 'Anual', 'ESCOLA A', 'ENSINO FUNDAMENTAL', '3 ANO']]
+        self.page.locator.return_value.count.return_value = 1
+        self.env['disciplinas_historico'].cadastrar.return_value = 8
+        result = self.env['executar_lancamento_historico'](self.data)
+        self.assertIn('8 disciplinas', result)
+        self.env['abrir_disciplinas_registro'].assert_called_once_with(self.page, '2026', f'3{chr(186)} ANO', 'ESCOLA A')
+        self.env['disciplinas_historico'].cadastrar.assert_called_once_with(self.page, '2026', notas={})
+        self.assertFalse(self.env['SerieEscolhida'].mock_calls)
+
     def test_new_record_continues_to_correct_series(self):
         self.page.locator.return_value.filter.return_value.evaluate_all.return_value = [
             ['2025', 'Anual', 'ESCOLA A', 'ENSINO FUNDAMENTAL', '3 ANO']]
@@ -66,6 +86,19 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'matrícula'):
             self.env['executar_lancamento_historico'](self.data)
         self.assertFalse(self.env['SerieEscolhida'].mock_calls)
+
+    def test_non_transferred_student_blocked_before_browser_or_insertion(self):
+        self.env['carregar_rel_aluno_csv'].return_value[0]['situacao'] = 'ATIVO'
+        with self.assertRaisesRegex(ValueError, 'ATIVO'):
+            self.env['executar_lancamento_historico'](self.data)
+        self.env['garantir_sessao_gemul'].assert_not_called()
+        self.assertFalse(self.env['SerieEscolhida'].mock_calls)
+
+    def test_confirmed_active_student_can_launch(self):
+        self.env['carregar_rel_aluno_csv'].return_value[0]['situacao'] = 'ATIVO'
+        self.page.locator.return_value.filter.return_value.evaluate_all.return_value = []
+        self.env['executar_lancamento_historico'](dict(self.data, situacao_ativo_confirmada=True))
+        self.env['SerieEscolhida'].ano3.assert_called_once()
 
     def test_request_uses_student_and_school_without_invented_deadline(self):
         text = self.env['gerar_texto_cobranca_historico'](self.data)

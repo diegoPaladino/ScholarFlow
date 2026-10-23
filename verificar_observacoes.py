@@ -1,11 +1,13 @@
 import ast
+import re
 from pathlib import Path
 from typing import Any, Dict
 
 source = Path(__file__).resolve().with_name('main.py').read_text(encoding='utf-8-sig')
 tree = ast.parse(source)
 names = {'mesclar_textos_observacao', 'normalizar_registro_historico',
-         'mesclar_registro_historico', 'construir_historicos_por_ano', 'escrever_observacoes'}
+         'mesclar_registro_historico', 'construir_historicos_por_ano', 'escrever_observacoes',
+         'mover_continuidade_estudos_para_final'}
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
 schema = next(n.value for n in tree.body if isinstance(n, ast.Assign)
               and any(isinstance(t, ast.Name) and t.id == 'HISTORICO_JSON_SCHEMA' for t in n.targets))
@@ -15,7 +17,7 @@ for obj in [schema, schema['properties']['historicos']['items']]:
     assert len(obj['required']) == len(set(obj['required']))
     assert 'txt_observacoes_gerais' in obj['required']
 
-env = dict(Any=Any, Dict=Dict, corrigir_texto_utf8=lambda t: str(t or ''),
+env = dict(Any=Any, Dict=Dict, re=re, corrigir_texto_utf8=lambda t: str(t or ''),
            converter_conceitos_em_observacoes=lambda r: r,
            extrair_ano_4_digitos=lambda a: str(a) if len(str(a)) == 4 else '',
            normalizar_serie=lambda s: s, normalizar_texto_busca=lambda s: s.upper(),

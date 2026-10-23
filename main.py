@@ -1,8 +1,11 @@
-# Bibliotecas
+﻿# Bibliotecas
 # -*- coding: utf-8 -*-
 import time
 import credenciais_locais
 import whatsapp_posicao
+import cobranca_historico
+import student_transfer
+import disciplinas_historico
 from student_sync import atualizar_base_diaria, base_atualizada_hoje, verificar_espaco
 from datetime import datetime
 import json
@@ -265,12 +268,15 @@ import csv
 import difflib
 
 
-def solicitar_credenciais_gemul():
+def solicitar_credenciais_gemul(forcar_dialogo=False):
     try:
         salvas = credenciais_locais.carregar()
     except Exception:
         salvas = {}
         messagebox.showwarning("Credenciais", "Não foi possível ler as credenciais salvas. Informe-as novamente.")
+    if not forcar_dialogo and salvas.get('usuario') and salvas.get('senha'):
+        return (os.getenv('GEMUL_USERNAME') or salvas['usuario'],
+                os.getenv('GEMUL_PASSWORD') or salvas['senha'], True)
 
     class LoginDialog(simpledialog.Dialog):
         def body(self, master):
@@ -309,11 +315,35 @@ def gerar_texto_cobranca_historico(dados):
     matricula = re.sub(r'\D', '', str(dados.get('numero_matricula', '')))
     if not nome or len(matricula) != 9:
         raise ValueError('Informe o nome do aluno e uma matrícula válida para gerar a cobrança.')
-    escola = str(dados.get('nome_escola', '')).strip() or ESCOLA_PADRAO
+    escola = ESCOLA_PADRAO
     return (
-        f"Olá! Falta entregar o histórico escolar de {nome} (matrícula {matricula}).\n\n"
+        f"Olá! Aqui é da secretaria da {escola}.\n\n"
+        f"Falta entregar o histórico escolar de {nome} (matrícula {matricula}).\n\n"
         f"Peça esse documento na escola anterior e entregue na secretaria da {escola}.\n\n"
-        f"Se já entregou, avise a secretaria. Obrigado!"
+        "Obrigado!"
+    )
+
+
+def gerar_texto_cobranca_institucional(dados):
+    nome = str(dados.get('nome_aluno') or '').strip()
+    matricula = re.sub(r'\D', '', str(dados.get('numero_matricula') or ''))
+    if not nome or len(matricula) != 9:
+        raise ValueError('Informe o nome do aluno e uma matrícula válida para gerar a cobrança.')
+    nascimento = str(dados.get('data_nascimento') or '').strip()
+    identificacao = f'{nome}, data de nascimento: {nascimento}' if nascimento else nome
+    return (
+        f'Assunto: Solicitação de histórico escolar escaneado — {nome}\n\n'
+        'Prezados(as),\n\n'
+        f'A secretaria da {ESCOLA_PADRAO} solicita o envio do histórico escolar '
+        f'escaneado do(a) aluno(a) {identificacao}, referente aos estudos realizados '
+        'nessa instituição, para regularização de sua documentação escolar.\n\n'
+        'Pedimos que o documento completo e legível, com as assinaturas e os carimbos '
+        'pertinentes, seja encaminhado para escolamjardimbelavista@gmail.com.\n\n'
+        'Caso o documento já tenha sido enviado, solicitamos a gentileza de reenviá-lo '
+        'ou informar a data do envio.\n\n'
+        'Agradecemos a colaboração e permanecemos à disposição para esclarecimentos.\n\n'
+        f'Atenciosamente,\nSecretaria Escolar\n{ESCOLA_PADRAO}\n'
+        'E-mail: escolamjardimbelavista@gmail.com'
     )
 
 
@@ -351,7 +381,7 @@ def abrir_disciplinas_registro(pagina, ano, serie, escola, obrigatorio=True, tim
     botao = linhas.nth(indice).get_by_role("button", name="Editar Disciplinas", exact=True)
     botao.scroll_into_view_if_needed(timeout=timeout_ms)
     botao.click(timeout=timeout_ms)
-    pagina.locator('#cmbDisciplina').wait_for(state="visible", timeout=timeout_ms)
+    pagina.locator('#tbodyDisciplinas, #cmbDisciplina').first.wait_for(state="attached", timeout=timeout_ms)
     registrar_etapa_historico("disciplinas_abertas", pagina, ano=ano, serie=serie)
     return True
 
@@ -883,23 +913,33 @@ class FuncoesDoPrograma:
         senha = page.locator('xpath=//*[@id="txtSenha"]')
         botao_login = page.locator('xpath=//*[@id="frm"]/button')
 
-        usuario.wait_for(state="visible", timeout=10000)
-        login, password, lembrar = solicitar_credenciais_gemul()
-        if not login or not password:
-            raise RuntimeError("Login cancelado. Informe usuario e senha para continuar.")
-        usuario.fill(login)
-        senha.fill(password)
-
-        # Clique no botao Acessar
-        botao_login.click()
-        page.wait_for_load_state("domcontentloaded")
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception:
-            pass
-        if lembrar and '/app/' in page.url.lower():
+        for tentativa in range(2):
+            usuario.wait_for(state="visible", timeout=10000)
+            login, password, lembrar = solicitar_credenciais_gemul(forcar_dialogo=tentativa > 0)
+            if not login or not password:
+                raise RuntimeError("Login cancelado. Informe usuario e senha para continuar.")
+            usuario.fill(login)
+            senha.fill(password)
+            botao_login.click()
+            page.wait_for_load_state("domcontentloaded")
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            if page.locator('#txtLogin').count() == 0:
+                break
+            if tentativa == 0:
+                messagebox.showwarning('Credenciais',
+                    'O GEMUL não concluiu o acesso. Confira o usuário e a senha para tentar novamente.')
+        else:
+            raise RuntimeError('O GEMUL não aceitou as credenciais. Confira o usuário e a senha.')
+        url = page.url.lower()
+        if '/app/' not in url and '/login/selecionar_escola.asp' not in url:
+            raise RuntimeError('O GEMUL não confirmou o acesso. As credenciais não foram memorizadas.')
+        if lembrar:
             try:
                 credenciais_locais.salvar(login, password)
+                print('Credenciais GEMUL memorizadas com proteção do Windows.')
             except Exception:
                 messagebox.showwarning('Credenciais', 'O login foi realizado, mas não foi possível memorizar as credenciais.')
         print(f'Login enviado pelo botao "Acessar". URL atual apos login: {page.url}')
@@ -1018,6 +1058,8 @@ class FuncoesDoPrograma:
         return False
 
     def escrever_texto(driver, xpath, texto, timeout_ms=10000):
+        if xpath == '//*[@id="txtCHTotal"]':
+            return FuncoesDoPrograma.preencher_carga_horaria(driver, texto, timeout_ms)
         attempts = 3
         texto_normalizado = corrigir_texto_utf8(texto)
         while attempts > 0:
@@ -1033,6 +1075,31 @@ class FuncoesDoPrograma:
                 if attempts == 0:
                     raise
                 time.sleep(0.3)
+
+    def preencher_carga_horaria(driver, valor, timeout_ms=10000):
+        texto = str(valor if valor is not None else '').strip()
+        if not re.fullmatch(r'\d+(?:[.,]\d+)?', texto) or float(texto.replace(',', '.')) <= 0:
+            raise ValueError('Informe uma carga horária válida, maior que zero, antes de lançar.')
+        campo = _build_locator(driver, By.XPATH, '//*[@id="txtCHTotal"]')
+        _garantir_locator_visivel(driver, campo, timeout_ms=timeout_ms)
+        campo.fill(texto)
+        campo.dispatch_event('change')
+        campo.press('Tab')
+        FuncoesDoPrograma.conferir_carga_horaria(driver, texto)
+        sessao_execucao['carga_horaria_esperada'] = texto
+        registrar_etapa_historico('carga_horaria_preenchida', _get_base(driver), carga_horaria=texto)
+
+    def conferir_carga_horaria(driver, esperado):
+        campo = _build_locator(driver, By.XPATH, '//*[@id="txtCHTotal"]')
+        atual = campo.input_value().strip().replace(',', '.')
+        try:
+            corresponde = float(atual) == float(str(esperado).replace(',', '.')) and float(atual) > 0
+        except (ValueError, TypeError):
+            corresponde = False
+        if not corresponde:
+            raise RuntimeError(
+                f'Carga horária não confirmada no GEMUL: esperado {esperado}, campo contém {atual or "vazio"}. '
+                'O envio foi interrompido para evitar gravar a carga zerada.')
 
     def marcar_checkbox(driver, xpath, timeout_ms=10000):
         attempts = 3
@@ -1166,6 +1233,7 @@ class FuncoesDoPrograma:
         raise RuntimeError("Nao foi possivel acionar o botao Incluir.")
 
     def preparar_formulario_inclusao(driver_ref, ano):
+        sessao_execucao.pop('carga_horaria_esperada', None)
         pagina_atual = _get_base(driver_ref)
         matricula_atual = _normalizar_matricula_gemul(sessao_execucao.get("matricula_atual"))
 
@@ -1184,9 +1252,9 @@ class FuncoesDoPrograma:
 
     def garantir_etapa_disciplinas(driver, timeout_ms=15000):
         pagina = _get_base(driver)
-        disciplina = pagina.locator('#cmbDisciplina')
+        disciplina = pagina.locator('#tbodyDisciplinas, #cmbDisciplina').first
         if disciplina.count():
-            disciplina.wait_for(state="visible", timeout=timeout_ms)
+            disciplina.wait_for(state="attached", timeout=timeout_ms)
             return
         alvo = sessao_execucao.get("historico_alvo", {})
         if "sca_historico_escolar_novocon.asp" in pagina.url.lower():
@@ -1194,7 +1262,7 @@ class FuncoesDoPrograma:
             return
         # The initial history form must be saved before disciplines exist in the DOM.
         if "sca_historico_escolar_novo.asp" not in pagina.url.lower():
-            disciplina.wait_for(state="visible", timeout=timeout_ms)
+            disciplina.wait_for(state="attached", timeout=timeout_ms)
             return
         botao = pagina.get_by_role("button", name="Incluir", exact=True)
         if not botao.count():
@@ -1214,12 +1282,16 @@ class FuncoesDoPrograma:
                     except PlaywrightTimeoutError:
                         continue
         registrar_etapa_historico("salvar_cabecalho", pagina, **alvo)
+        carga_esperada = sessao_execucao.get('carga_horaria_esperada')
+        if not carga_esperada:
+            raise ValueError('Carga horária não informada antes de salvar o cabeçalho.')
+        FuncoesDoPrograma.conferir_carga_horaria(pagina, carga_esperada)
         botao.click(timeout=timeout_ms)
         pagina.wait_for_load_state("domcontentloaded")
         if "sca_historico_escolar_novocon.asp" in pagina.url.lower():
             abrir_disciplinas_registro(pagina, **alvo, timeout_ms=timeout_ms)
         else:
-            disciplina.wait_for(state="visible", timeout=timeout_ms)
+            disciplina.wait_for(state="attached", timeout=timeout_ms)
 
     def incluir_enviar_dados(driver): 
         attempts = 3
@@ -1361,51 +1433,46 @@ class SelecionarCurso:
         self.driver = driver
 
     def _selecionar_curso_por_valor(self, value: str, descricao: str) -> None:
-        """Tenta selecionar o curso e emite logs detalhados de cada etapa."""
-        global driver
-        self.driver = driver
+        """Confirm the visible selection, including after a change triggers navigation."""
+        pagina = _get_base(self.driver)
+        campo = pagina.locator('#cmbCurso:visible').first
+
+        def selecionado():
+            atual = campo.evaluate("el => ({value: el.value, label: el.selectedOptions[0]?.textContent || ''})")
+            return (_normalizar_rotulo_interface(atual['label']) ==
+                    _normalizar_rotulo_interface(descricao))
+
+        ultimo_erro = None
         for tentativa in range(1, 4):
             try:
-                print(f"[Curso] Tentativa {tentativa} para selecionar '{descricao}' (value={value})")
-                seletor = self._clicar_campo_curso()
-
-                seletor.select_option(value=value, force=True)
-                try:
-                    self.driver.wait_for_load_state('networkidle', timeout=5000)
-                except PlaywrightTimeoutError:
-                    print("[Curso] Nenhuma navegaÃ§Ã£o detectada apÃ³s select_option.")
-                self.driver.wait_for_timeout(300)
-
-                valor_atual = self.driver.eval_on_selector('#cmbCurso', '(el) => el.value')
-                print(f"[Curso] Valor apÃ³s select_option: {valor_atual}")
-                if valor_atual == value:
+                campo.wait_for(state='visible', timeout=10000)
+                if selecionado():
                     self._sincronizar_campo_txtcurso(descricao)
-                    print(f"[Curso] SeleÃ§Ã£o confirmada via select_option.")
                     return
-
-                self._forcar_selecao_via_js(value, descricao)
-                valor_atual = self.driver.eval_on_selector('#cmbCurso', '(el) => el.value')
-                print(f"[Curso] Valor apÃ³s fallback JS: {valor_atual}")
-                if valor_atual == value:
-                    print(f"[Curso] SeleÃ§Ã£o confirmada via fallback JS.")
-                    return
-
-                self._selecionar_via_teclado(value)
-                valor_atual = self.driver.eval_on_selector('#cmbCurso', '(el) => el.value')
-                print(f"[Curso] Valor apÃ³s fallback teclado: {valor_atual}")
-                if valor_atual == value:
+                opcoes = campo.evaluate("el => Array.from(el.options).map(o => ({value:o.value, label:o.textContent}))")
+                correspondentes = [op for op in opcoes if
+                    _normalizar_rotulo_interface(op['label']) == _normalizar_rotulo_interface(descricao)]
+                if len(correspondentes) != 1:
+                    raise RuntimeError(f"Curso nao encontrado de forma unica: {descricao}.")
+                campo.select_option(value=correspondentes[0]['value'], timeout=10000)
+                pagina.wait_for_load_state('domcontentloaded', timeout=10000)
+                campo.wait_for(state='visible', timeout=10000)
+                if selecionado():
                     self._sincronizar_campo_txtcurso(descricao)
-                    print(f"[Curso] SeleÃ§Ã£o confirmada via teclado.")
                     return
-
             except PlaywrightError as exc:
-                print(f"[Curso] Erro Playwright na tentativa {tentativa}: {exc}")
-            except Exception as exc:
-                print(f"[Curso] Erro inesperado na tentativa {tentativa}: {exc}")
-
-            self.driver.wait_for_timeout(400)
-
-        raise RuntimeError(f"[Curso] Falha ao selecionar '{descricao}' (value={value}) apÃ³s mÃºltiplas tentativas.")
+                ultimo_erro = exc
+                # Navigation can interrupt select_option after the selection succeeded.
+                try:
+                    pagina.wait_for_load_state('domcontentloaded', timeout=10000)
+                    campo.wait_for(state='visible', timeout=10000)
+                    if selecionado():
+                        self._sincronizar_campo_txtcurso(descricao)
+                        return
+                except PlaywrightError as confirmacao:
+                    ultimo_erro = confirmacao
+            print(f"[Curso] Selecao ainda nao confirmada na tentativa {tentativa}.")
+        raise RuntimeError(f"[Curso] Falha ao confirmar '{descricao}' apos o carregamento: {ultimo_erro}")
 
     def _forcar_selecao_via_js(self, value: str, descricao: str) -> None:
         """ForÃ§a o value do select via JS e dispara eventos esperados."""
@@ -1588,6 +1655,30 @@ class SelecionaMateria:
         return True
 
 
+def cadastrar_disciplinas_com_extras(pagina, ano, dados):
+    resumo = {}
+    quantidade = disciplinas_historico.cadastrar(
+        pagina, ano, notas=montar_disciplinas_notas_interface(dados),
+        extras=dados.get("disciplinas_extra", []), resumo=resumo)
+    ausentes = resumo.get("extras_ausentes", [])
+    texto = ''
+    if ausentes:
+        texto = "Disciplinas do documento sem cadastro no GEMUL: " + "; ".join(
+            f"{item['disciplina']}: {item['nota']}" for item in ausentes) + "."
+    disciplinas_historico.acrescentar_observacao(
+        pagina, f"{GEMUL_HISTORICO_URL}?txtMatricula={dados['numero_matricula']}",
+        ano, dados['serie'], dados['nome_escola'], texto, indice_registro_historico,
+        catalogo=resumo.get('catalogo', []), limpar_geral=True)
+    partes = []
+    if resumo.get("extras_lancadas"):
+        partes.append("Disciplinas extras lancadas: " + "; ".join(resumo["extras_lancadas"]) + ".")
+    if ausentes:
+        partes.append("Registradas nas observacoes: " + "; ".join(
+            f"{item['disciplina']}: {item['nota']}" for item in ausentes) + ".")
+    dados["resumo_disciplinas_extra"] = "\n".join(partes)
+    return quantidade
+
+
 def processar_disciplinas_ou_registro_minimo(
     seletor_materia: SelecionaMateria,
     dados: Dict[str, Any],
@@ -1595,6 +1686,11 @@ def processar_disciplinas_ou_registro_minimo(
     carga_horaria: Any,
 ) -> None:
     FuncoesDoPrograma.garantir_etapa_disciplinas(seletor_materia.driver)
+    pagina = _get_base(seletor_materia.driver)
+    if pagina.locator('#tbodyDisciplinas').count():
+        quantidade = cadastrar_disciplinas_com_extras(pagina, ano, dados)
+        registrar_etapa_historico('disciplinas_confirmadas', pagina, ano=ano, incluidas=quantidade)
+        return
     disciplinas_notas = montar_disciplinas_notas_interface(dados)
     cursando = dados.get("cursando", "nao")
     if disciplinas_notas:
@@ -1738,6 +1834,11 @@ APARECIDA_RESOLUCAO_011_TEXTO_CURTO = "Resolu\u00e7\u00e3o 011/2019."
 APARECIDA_OBSERVACAO_1O_2O_ANO = (
     " Avalia\u00e7\u00e3o realizada por meio de Ficha Descritiva, sendo atribu\u00edda nota apenas "
     "\u00e0 disciplina de Educa\u00e7\u00e3o F\u00edsica. Segue anexa a respectiva Ficha Descritiva."
+)
+APARECIDA_RESOLUCAO_016_2026_TEXTO = (
+    "Resolução CME nº 16/2026, de 20 de fevereiro de 2026, autoriza a adoção de nota numérica "
+    "no Ciclo de Alfabetização da Rede Municipal de Ensino de Aparecida de Goiânia, "
+    "em consonância com a Resolução CME nº 11/2019."
 )
 APARECIDA_OBSERVACAO_AGRUPAMENTO_4_5 = (
     " Avalia\u00e7\u00e3o realizada por meio de Ficha Descritiva. "
@@ -2151,9 +2252,6 @@ def mapear_disciplina_para_chave_nota(nome_disciplina: str) -> str:
         return ""
     if nome_norm in DISCIPLINA_EQUIVALENCIAS:
         return DISCIPLINA_EQUIVALENCIAS[nome_norm]
-    for alias, chave_nota in DISCIPLINA_EQUIVALENCIAS.items():
-        if alias in nome_norm or nome_norm in alias:
-            return chave_nota
     return ""
 
 
@@ -2940,6 +3038,13 @@ def normalizar_registro_historico(registro: Dict[str, Any]) -> Dict[str, str]:
     for chave_nota in CHAVES_NOTAS:
         saida[chave_nota] = limpar_nota_extraida(registro.get(chave_nota, ""))
 
+    saida["disciplinas_extra"] = [
+        {"disciplina": str(item.get("disciplina", "")).strip(),
+         "nota": limpar_nota_extraida(item.get("nota", ""))}
+        for item in registro.get("disciplinas_extra", []) if isinstance(item, dict)
+        and not mapear_disciplina_para_chave_nota(str(item.get("disciplina", "")))
+        and nota_deve_ser_lancada(item.get("nota", ""))
+    ]
     aplicar_equivalencias_de_disciplinas(registro, saida)
 
     return saida
@@ -2950,6 +3055,13 @@ def mesclar_registro_historico(base: Dict[str, str], novo: Dict[str, str]) -> Di
         return dict(novo)
     combinado = dict(base)
     for chave, valor in novo.items():
+        if chave == "disciplinas_extra":
+            extras = list(combinado.get(chave, []))
+            for item in valor:
+                if item not in extras:
+                    extras.append(item)
+            combinado[chave] = extras
+            continue
         if not combinado.get(chave) and valor:
             combinado[chave] = valor
     return combinado
@@ -3007,7 +3119,7 @@ def carregar_prompt_historico() -> str:
         "mapeie para o campo principal e, se necessario, inclua em 'disciplinas_extra'. "
         "Se houver conceito em vez de nota numerica, nao preencha nota_* com a sigla; "
         "descreva isso de forma sucinta em txt_observacoes, listando as materias avaliadas por conceito. "
-        "Disciplinas fora da tabela principal devem ir para txt_observacoes. "
+        "Disciplinas fora da tabela principal devem ir para disciplinas_extra, com nome e nota. "
         "Se algum campo nao estiver presente, retorne string vazia."
     )
 
@@ -3399,14 +3511,18 @@ def extrair_campos_historico_com_openai(caminho_arquivo: Any, model: str = "") -
 
     prompt_base = carregar_prompt_historico() + (
         " Separe as observacoes por abrangencia: txt_observacoes contem somente informacoes "
-        "do ano/serie correspondente, incluindo conceitos, disciplinas extras e ocorrencias daquele ano. "
+        "do ano/serie correspondente e ocorrencias daquele ano. "
         "txt_observacoes_gerais contem somente informacoes que se aplicam ao historico inteiro, "
         "sem vinculo com um ano especifico. Uma observacao intitulada geral mas que mencione "
         "um ano/serie deve ser atribuida a esse ano em txt_observacoes. "
         "Retorne a observacao geral no nivel principal e a mesma observacao em cada item de historicos. "
         "Nao duplique o mesmo texto entre os dois campos, nao invente observacoes e use string vazia "
         "quando nao houver informacao. Se a abrangencia for incerta, mantenha no ano associado "
-        "pelo documento e preserve o texto para revisao."
+        "pelo documento e preserve o texto para revisao. "
+        "Registre todas as disciplinas extras em disciplinas_extra, com disciplina e nota, "
+        "sem repetir essas notas em txt_observacoes. Para conceitos, use a frase padrao "
+        "Aluno(a) recebeu o conceito \"SIGLA\" na materia NOME. "
+        "A observacao geral sera usada somente para conferencia local do usuario."
     )
     conteudo_usuario = [
         {
@@ -3676,6 +3792,9 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     numero_matricula = re.sub(r"\D", "", str(dados.get("numero_matricula", "") or "").strip())
     if dados.get("deve_historico") or matricula_deve_historico(numero_matricula):
         raise ValueError("Aluno com historico pendente. Gere a cobranca do documento antes de continuar os lancamentos.")
+    student_transfer.exigir_transferido(carregar_rel_aluno_csv(localizar_csv_rel_aluno()),
+                                       numero_matricula, dados.get("nome_aluno", ""),
+                                       permitir_ativo=dados.get("situacao_ativo_confirmada") is True)
     driver_ativo = garantir_sessao_gemul(numero_matricula)
 
     serie_bruta = str(dados.get("serie", "") or "").strip()
@@ -3712,6 +3831,12 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     registros = linhas.evaluate_all("rows => rows.map(row => Array.from(row.cells).map(cell => cell.innerText.trim()))")
     indice = indice_registro_historico(registros, ano, serie, nome_escola)
     if indice is not None:
+        if serie in {f'{n}{ORDINAL_INDICATOR} ANO' for n in range(1, 6)}:
+            abrir_disciplinas_registro(pagina, ano, serie, nome_escola)
+            if pagina.locator('#tbodyDisciplinas').count():
+                quantidade = cadastrar_disciplinas_com_extras(pagina, ano, dados)
+                registrar_etapa_historico('disciplinas_confirmadas', pagina, ano=ano, incluidas=quantidade)
+                return f'Historico existente: {quantidade} disciplinas incluidas; notas conferidas no GEMUL. ' + dados.get('resumo_disciplinas_extra', '')
         registrar_etapa_historico("duplicacao_bloqueada", pagina, ano=ano, serie=serie, escola=nome_escola)
         return f"Registro já existente: {ano}, {serie}, {nome_escola}. Nenhum dado foi incluído."
     if serie == "AGRUPAMENTO 4":
@@ -3733,6 +3858,8 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
 
     duracao = formatar_duracao(time.time() - inicio_lancamento)
     mensagem = f"Lancamento concluido para {serie} em {duracao}."
+    if dados.get("resumo_disciplinas_extra"):
+        mensagem += "\n" + dados["resumo_disciplinas_extra"]
     registrar_etapa_historico("concluido", pagina, ano=ano, serie=serie, duracao=duracao)
     print(mensagem)
     Atalho.alerta_sonoro()
@@ -3775,7 +3902,6 @@ def obter_matricula():
     cursando_var = tk.BooleanVar()
     observacoes_var = tk.BooleanVar()
     deve_historico_var = tk.BooleanVar()
-    gerar_cobranca_var = tk.BooleanVar()
     txt_observacoes_var = tk.StringVar()
     marcar_disciplinas_var = tk.BooleanVar()
     nome_aluno_var = tk.StringVar()
@@ -3819,6 +3945,7 @@ def obter_matricula():
     ocr_estado = {"ativo": False, "inicio": 0.0, "frame": 0, "job": None}
     lancamento_em_andamento = {"ativo": False}
     consulta_matricula_estado = {"ultima_consultada": "", "ultimo_alerta_deve_historico": ""}
+    conferencia_transferencia = {"ativa": False, "pagina": None}
     monitoramento_navegador = {"ativo": True, "encerrando": False}
 
     def obter_var_disciplina(nome_disciplina: str):
@@ -3920,6 +4047,8 @@ def obter_matricula():
         dados_formulario["ja_estudou"] = "sim" if ja_estudou_var.get() else "nao"
         dados_formulario["ficha_descritiva"] = "sim" if ficha_descritiva_var.get() else "nao"
         dados_formulario["deve_historico"] = bool(deve_historico_var.get())
+        dados_formulario["situacao_ativo_confirmada"] = conferencia_transferencia.get("aluno_confirmado") == (
+            re.sub(r'\D', '', numero_matricula_var.get()), nome_aluno_var.get().strip())
         dados_formulario["observacoes"] = observacoes_var.get()
         dados_formulario["marcar_disciplinas"] = marcar_disciplinas_var.get()
 
@@ -3937,8 +4066,13 @@ def obter_matricula():
             var = obter_var_disciplina(disciplina)
             dados_formulario[chave_nota] = var.get() if var else ""
 
+        registro_ano = historicos_por_ano.get(dados_formulario["ano"], {})
+        dados_formulario["ano_sem_historico"] = dados.get("ano_sem_historico") == dados_formulario["ano"]
+        dados_formulario["disciplinas_extra"] = [] if dados_formulario["ano_sem_historico"] else registro_ano.get(
+            "disciplinas_extra", [] if historicos_por_ano else dados.get("disciplinas_extra", []))
         dados.clear()
         dados.update(dados_formulario)
+        dados["ano_sem_historico"] = dados_formulario["ano"] if dados_formulario["ano_sem_historico"] else ""
         return dados_formulario
 
     def atualizar_indicador_ocr():
@@ -3986,9 +4120,12 @@ def obter_matricula():
             messagebox.showinfo(
                 "Histórico pendente",
                 "Este aluno deve histórico escolar. Os lançamentos estão bloqueados até a regularização. "
-                "Use a opção Gerar cobrança de histórico para preparar a solicitação.", parent=root,
+                "Use o botão Iniciar Protocolo de Cobrança de Histórico para preparar a solicitação.", parent=root,
             )
             return
+        if not garantir_aluno_transferido():
+            return
+        dados_formulario = coletar_dados_formulario()
         if not str(dados_formulario.get("serie", "") or "").strip():
             messagebox.showwarning("Serie", "Informe a serie antes de lancar.", parent=root)
             return
@@ -4034,6 +4171,8 @@ def obter_matricula():
             )
         else:
             status_scan_var.set(mensagem)
+            if dados_formulario.get("resumo_disciplinas_extra"):
+                messagebox.showinfo("Disciplinas extras", dados_formulario["resumo_disciplinas_extra"], parent=root)
             if mensagem.startswith('Registro já existente:'):
                 messagebox.showinfo('Lançamento já cadastrado', mensagem, parent=root)
         finally:
@@ -4069,6 +4208,26 @@ def obter_matricula():
 
     def on_ano_change(*_args):
         if bloqueio_auto["ativo"]:
+            return
+        ano = extrair_ano_4_digitos(ano_var.get())
+        if ano and (ano == str(datetime.now().year) or ano not in historicos_por_ano):
+            bloqueio_auto["ativo"] = True
+            try:
+                for var in disciplinas_vars.values():
+                    var.set("")
+                definir_texto_observacoes("")
+                definir_texto_observacoes_gerais("")
+                observacoes_var.set(False)
+                marcar_disciplinas_var.set(False)
+                ficha_descritiva_var.set(False)
+                cursando_var.set(ano == str(datetime.now().year))
+                dados["ano_sem_historico"] = ano
+                dados["disciplinas_extra"] = []
+                dados.pop("resumo_disciplinas_extra", None)
+                mostrar_disciplinas()
+            finally:
+                bloqueio_auto["ativo"] = False
+            on_transfer_date_change()
             return
         if aplicar_historico_por_ano(ano_var.get()):
             return
@@ -4150,27 +4309,61 @@ def obter_matricula():
             status_scan_var.set(f"Matricula {matricula} desmarcada como devedor de historico.")
 
     def abrir_cobranca_historico():
-        if not gerar_cobranca_var.get():
-            return
         try:
-            texto = gerar_texto_cobranca_historico(coletar_dados_formulario())
-        except ValueError as exc:
-            gerar_cobranca_var.set(False)
+            matricula = re.sub(r'\D', '', numero_matricula_var.get())
+            registros = [r for r in carregar_base_rel_aluno() if r['matricula'] == matricula]
+            nomes = {normalizar_texto_busca(r['nome_aluno']) for r in registros}
+            if not registros or len(nomes) != 1:
+                raise ValueError('Consulte uma matrícula válida na base de alunos antes de iniciar a cobrança.')
+            if normalizar_texto_busca(nome_aluno_var.get()) not in nomes:
+                raise ValueError('O nome informado não corresponde à matrícula na base de alunos.')
+            if not garantir_aluno_transferido():
+                return
+            texto = gerar_texto_cobranca_historico({
+                'numero_matricula': matricula, 'nome_aluno': registros[0]['nome_aluno']})
+            texto_institucional = gerar_texto_cobranca_institucional({
+                'numero_matricula': matricula, 'nome_aluno': registros[0]['nome_aluno'],
+                'data_nascimento': registros[0].get('data_nascimento', '')})
+            try:
+                cobranca_historico.salvar_textos_padrao(texto, texto_institucional, registros=registros)
+            except OSError as exc:
+                messagebox.showwarning('Arquivo de cobrança',
+                    'Não foi possível atualizar C:\\Users\\Public\\textos_padrao_cobranca_historico.txt.\n'
+                    f'O arquivo pode conter dados do aluno anterior.\n{exc}\n\n'
+                    'Os textos atuais continuam disponíveis na janela de cobrança.', parent=root)
+            contatos = cobranca_historico.contatos(registros)
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            utilizados = cobranca_historico.carregar_utilizados(base_dir, matricula)
+        except (ValueError, OSError) as exc:
             messagebox.showwarning('Cobrança de histórico', str(exc), parent=root)
             return
         janela = tk.Toplevel(root)
         janela.title('Cobrança de histórico — revisar e copiar')
-        janela.geometry('760x460')
-        campo = tk.Text(janela, wrap='word', padx=12, pady=12)
+        janela.geometry('800x650')
+        abas = ttk.Notebook(janela)
+        abas.pack(fill='both', expand=True, padx=10, pady=10)
+        aba_responsaveis = ttk.Frame(abas)
+        aba_institucional = ttk.Frame(abas)
+        abas.add(aba_responsaveis, text='Responsáveis / WhatsApp')
+        abas.add(aba_institucional, text='Instituição anterior / E-mail')
+        ttk.Label(aba_institucional, text='Revise o assunto e a mensagem antes de copiar para o e-mail.',
+                  wraplength=740).pack(anchor='w', padx=12, pady=8)
+        campo_institucional = tk.Text(aba_institucional, wrap='word', padx=12, pady=12, height=18)
+        campo_institucional.pack(fill='both', expand=True)
+        campo_institucional.insert('1.0', texto_institucional)
+        campo = tk.Text(aba_responsaveis, wrap='word', padx=12, pady=12, height=12)
         campo.pack(fill='both', expand=True)
         campo.insert('1.0', texto)
         botoes = ttk.Frame(janela)
         botoes.pack(fill='x', padx=10, pady=10)
 
+        def campo_atual():
+            return campo_institucional if abas.select() == str(aba_institucional) else campo
+
         def copiar():
             try:
                 root.clipboard_clear()
-                root.clipboard_append(campo.get('1.0', 'end-1c'))
+                root.clipboard_append(campo_atual().get('1.0', 'end-1c'))
             except tk.TclError:
                 aviso_copia.set('Não foi possível copiar. Selecione o texto e pressione Ctrl+C.')
             else:
@@ -4181,16 +4374,60 @@ def obter_matricula():
         ttk.Label(janela, textvariable=aviso_copia).pack(fill='x', padx=15, pady=5)
         copiar()
 
+        selecao = ttk.LabelFrame(aba_responsaveis, text='Escolha o telefone para abrir a conversa', padding=10)
+        selecao.pack(fill='x', padx=12, pady=8)
+        ttk.Label(selecao, text='Cinza: link já aberto para este aluno. Cole o texto com Ctrl+V no WhatsApp.',
+                  wraplength=740).pack(anchor='w', pady=5)
+        if not contatos:
+            ttk.Label(selecao, text='Nenhum telefone com DDD válido encontrado na base diária.').pack(anchor='w')
+        lista_canvas = tk.Canvas(selecao, height=150, highlightthickness=0)
+        lista_scroll = ttk.Scrollbar(selecao, orient='vertical', command=lista_canvas.yview)
+        lista_scroll.pack(side='right', fill='y')
+        lista_canvas.pack(side='left', fill='both', expand=True)
+        lista_canvas.configure(yscrollcommand=lista_scroll.set)
+        lista_contatos = ttk.Frame(lista_canvas)
+        lista_id = lista_canvas.create_window((0, 0), window=lista_contatos, anchor='nw')
+        lista_contatos.bind('<Configure>', lambda event: lista_canvas.configure(scrollregion=lista_canvas.bbox('all')))
+        lista_canvas.bind('<Configure>', lambda event: lista_canvas.itemconfigure(lista_id, width=event.width))
+
+        def usar_contato(contato, botao):
+            botao.configure(state='disabled')
+            janela.update_idletasks()
+            try:
+                posicao = whatsapp_posicao.carregar_posicao(base_dir)
+                cobranca_historico.abrir_conversa(
+                    contato['numero'], campo.get('1.0', 'end-1c'), posicao, p, pp)
+            except Exception as exc:
+                messagebox.showerror('Cobrança de histórico', f'Não foi possível abrir a conversa:\n{exc}', parent=janela)
+            else:
+                botao.configure(bg='#cccccc', activebackground='#bfbfbf')
+                aviso_copia.set('Conversa solicitada. Texto no clipboard: use Ctrl+V no WhatsApp.')
+                try:
+                    cobranca_historico.marcar_utilizado(base_dir, matricula, contato['numero'])
+                except (OSError, ValueError) as exc:
+                    messagebox.showwarning('Cobrança de histórico',
+                        f'O link foi aberto, mas não foi possível salvar a marca de utilizado:\n{exc}', parent=janela)
+            finally:
+                botao.configure(state='normal')
+
+        for contato in contatos:
+            rotulo = f"{contato['exibicao']} — {', '.join(contato['origens'])}"
+            botao = tk.Button(lista_contatos, text=rotulo, anchor='w', padx=10, pady=5,
+                              bg='#cccccc' if contato['numero'] in utilizados else '#d9ead3',
+                              activebackground='#bfbfbf' if contato['numero'] in utilizados else '#b6d7a8')
+            botao.configure(command=lambda c=contato, b=botao: usar_contato(c, b))
+            botao.pack(fill='x', pady=3)
+
         def salvar():
             destino = filedialog.asksaveasfilename(
                 parent=janela, title='Salvar cobrança', defaultextension='.txt',
-                initialfile=f'cobranca_historico_{numero_matricula_var.get()}.txt',
+                initialfile=f'cobranca_{"institucional" if campo_atual() is campo_institucional else "historico"}_{matricula}.txt',
                 filetypes=[('Texto', '*.txt')],
             )
             if destino:
                 try:
                     with open(destino, 'w', encoding='utf-8') as arquivo:
-                        arquivo.write(campo.get('1.0', 'end-1c'))
+                        arquivo.write(campo_atual().get('1.0', 'end-1c'))
                 except OSError as exc:
                     messagebox.showerror('Cobrança', f'Não foi possível salvar: {exc}', parent=janela)
 
@@ -4198,10 +4435,6 @@ def obter_matricula():
         ttk.Button(botoes, text='Salvar texto...', command=salvar).pack(side='left', padx=5)
         ttk.Button(botoes, text='Fechar', command=janela.destroy).pack(side='right', padx=5)
         janela.protocol('WM_DELETE_WINDOW', janela.destroy)
-        def ao_fechar(event):
-            if event.widget == janela:
-                gerar_cobranca_var.set(False)
-        janela.bind('<Destroy>', ao_fechar)
         registrar_etapa_historico('cobranca_gerada', matricula=numero_matricula_var.get())
 
     def on_observacoes_text_change(_event=None):
@@ -4401,13 +4634,13 @@ def obter_matricula():
             cursando_var.set(False)
             observacoes_var.set(False)
             deve_historico_var.set(False)
-            gerar_cobranca_var.set(False)
             marcar_disciplinas_var.set(False)
             definir_texto_observacoes("")
             definir_texto_observacoes_gerais("")
             for var in disciplinas_vars.values():
                 var.set("")
             historicos_por_ano.clear()
+            dados.clear()
             recortes_historico_por_arquivo.clear()
             recortes_documento_por_arquivo.clear()
             atualizar_campo_arquivos([])
@@ -4418,7 +4651,7 @@ def obter_matricula():
             status_documento_var.set("Nenhum documento civil processado.")
             ocr_timer_var.set("OCR parado: 00:00.0")
             try:
-                ano_combobox["values"] = []
+                ano_combobox["values"] = [str(datetime.now().year)]
             except Exception:
                 pass
         finally:
@@ -4449,6 +4682,100 @@ def obter_matricula():
         registros = carregar_rel_aluno_csv(caminho_csv)
         cache_rel_aluno["registros"] = registros
         return registros
+
+    def garantir_aluno_transferido():
+        if conferencia_transferencia["ativa"]:
+            return False
+        matricula = re.sub(r'\D', '', numero_matricula_var.get())
+        nome = nome_aluno_var.get().strip()
+        if len(matricula) != 9:
+            return False
+        try:
+            registros = carregar_base_rel_aluno()
+            if not student_transfer.esta_ativo(registros, matricula, nome):
+                conferencia_transferencia.pop('aluno_confirmado', None)
+                cursando_var.set(False)
+                return True
+            situacoes = student_transfer.situacoes(registros, matricula, nome)
+        except Exception as exc:
+            traceback.print_exc()
+            messagebox.showerror('Situação do aluno', f'Não foi possível conferir a situação:\n{exc}', parent=root)
+            return False
+        conferencia_transferencia['ativa'] = True
+        confirmado = {'valor': False}
+        janela = None
+        try:
+            resposta = messagebox.askyesnocancel('Situação do aluno',
+                f'{nome or "Aluno"} — matrícula {matricula}\n\n'
+                f'Situação na base: {", ".join(sorted(situacoes)) or "NÃO ENCONTRADA"}.\n'
+                'O aluno consta como ATIVO. Deseja continuar mesmo assim?\n\n'
+                'Sim: continuar.\nNão: conferir ou alterar a situação no GEMUL.\n'
+                'Cancelar: voltar sem continuar.', parent=root)
+            if resposta is None:
+                return False
+            if resposta:
+                conferencia_transferencia['aluno_confirmado'] = (matricula, nome)
+                registrar_etapa_historico('situacao_ativo_confirmada', matricula=matricula)
+                return True
+            pagina = conferencia_transferencia['pagina']
+            if pagina is None or pagina.is_closed():
+                pagina = student_transfer.abrir_pagina(_get_base(garantir_sessao_gemul()))
+                conferencia_transferencia['pagina'] = pagina
+            else:
+                pagina.bring_to_front()
+            registrar_etapa_historico('aguardando_transferencia_manual', pagina, matricula=matricula,
+                                     situacoes=sorted(situacoes))
+            janela = tk.Toplevel(root)
+            janela.title('Conferência da situação do aluno')
+            janela.geometry('560x230')
+            ttk.Label(janela, text=f'{nome or "Aluno"}\nMatrícula: {matricula}\n\n'
+                      'Confira a situação na página aberta do GEMUL.\n'
+                      'Atualize a base ou escolha Continuar mesmo assim.',
+                      wraplength=520, justify='left').pack(padx=16, pady=15)
+            aviso = tk.StringVar(value='Aguardando a alteração manual.')
+            ttk.Label(janela, textvariable=aviso, wraplength=520).pack(padx=16, pady=5)
+
+            def conferir():
+                botao.state(['disabled'])
+                aviso.set('Atualizando a base e conferindo a situação no GEMUL...')
+                janela.update_idletasks()
+                try:
+                    if not atualizar_base_alunos(forcar=True):
+                        aviso.set('A atualização falhou. Corrija o erro e confira novamente.')
+                        return
+                    if student_transfer.esta_ativo(carregar_base_rel_aluno(), matricula, nome):
+                        aviso.set('O aluno ainda consta como ATIVO. Confira no GEMUL ou continue mesmo assim.')
+                        return
+                    confirmado['valor'] = True
+                    cursando_var.set(False)
+                    status_scan_var.set('Conferência concluída: aluno não consta como ATIVO.')
+                    registrar_etapa_historico('transferencia_confirmada', matricula=matricula)
+                    janela.destroy()
+                finally:
+                    if janela.winfo_exists():
+                        botao.state(['!disabled'])
+
+            botao = ttk.Button(janela, text='Conferir novamente', command=conferir)
+            botao.pack(pady=5)
+            def continuar():
+                conferencia_transferencia['aluno_confirmado'] = (matricula, nome)
+                confirmado['valor'] = True
+                registrar_etapa_historico('situacao_ativo_confirmada', matricula=matricula)
+                janela.destroy()
+
+            ttk.Button(janela, text='Continuar mesmo assim', command=continuar).pack(pady=5)
+            ttk.Button(janela, text='Cancelar', command=janela.destroy).pack(pady=5)
+            janela.grab_set()
+            root.wait_window(janela)
+            return confirmado['valor']
+        except Exception as exc:
+            traceback.print_exc()
+            messagebox.showerror('Situação do aluno', f'Não foi possível abrir a conferência:\n{exc}', parent=root)
+            return False
+        finally:
+            if janela is not None and janela.winfo_exists():
+                janela.destroy()
+            conferencia_transferencia['ativa'] = False
 
     def aplicar_cadastro_matricula(matricula):
         registros = [r for r in carregar_base_rel_aluno()
@@ -4498,6 +4825,8 @@ def obter_matricula():
         if not isinstance(dados_cache, dict) or not dados_cache:
             return False
 
+        # Restore all OCR years before overlaying the last edited form.
+        aplicar_cache_historico_da_matricula(matricula_norm, atualizar_status=False)
         bloqueio_auto["ativo"] = True
         try:
             nome_aluno = str(dados_cache.get("nome_aluno", "") or "").strip()
@@ -4543,6 +4872,8 @@ def obter_matricula():
             for disciplina, var in disciplinas_vars.items():
                 var.set(str(dados_cache.get(disciplina, "") or "").strip())
 
+            dados["disciplinas_extra"] = dados_cache.get("disciplinas_extra", [])
+            dados["ano_sem_historico"] = ano_var.get() if dados_cache.get("ano_sem_historico") else ""
             mostrar_disciplinas()
         finally:
             bloqueio_auto["ativo"] = False
@@ -4669,6 +5000,15 @@ def obter_matricula():
         )
 
         if consulta_matricula_estado["ultima_consultada"] == matricula_digitada and nome_aluno_var.get().strip():
+            if exibir_alertas:
+                garantir_aluno_transferido()
+            return True
+
+        if (aplicar_cache_formulario_da_matricula(matricula_digitada, atualizar_status=atualizar_status)
+                or aplicar_cache_historico_da_matricula(matricula_digitada, atualizar_status=atualizar_status)):
+            consulta_matricula_estado["ultima_consultada"] = matricula_digitada
+            if exibir_alertas:
+                garantir_aluno_transferido()
             return True
 
         try:
@@ -4744,6 +5084,8 @@ def obter_matricula():
         if atualizar_status:
             if not cache_restaurado and not avisou_devedor:
                 status_scan_var.set(f"Matricula {matricula_digitada} carregada para: {nome_encontrado}.")
+        if exibir_alertas:
+            garantir_aluno_transferido()
         return True
 
     def on_matricula_confirmada(_event=None):
@@ -4756,18 +5098,24 @@ def obter_matricula():
     def atualizar_base_alunos(forcar=False):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         if not forcar and base_atualizada_hoje(base_dir):
-            return
+            registrar_etapa_historico('base_alunos_ja_atualizada')
+            return True
         status_scan_var.set("Atualizando lista de alunos no GEMUL...")
         root.update_idletasks()
         try:
             verificar_espaco(base_dir)
             pagina = _get_base(garantir_sessao_gemul())
             total = atualizar_base_diaria(pagina, base_dir, forcar=forcar)
+            registrar_etapa_historico('base_alunos_atualizada', registros=total, forcar=forcar)
             cache_csv.update(matriculas=None, nomes=None)
             cache_rel_aluno["registros"] = None
             consulta_matricula_estado["ultima_consultada"] = ""
             status_scan_var.set(f"Base atualizada: {total} registros de alunos.")
+            return True
         except Exception as exc:
+            registrar_etapa_historico('falha_atualizacao_alunos', erro=str(exc),
+                                     tipo_erro=type(exc).__name__, forcar=forcar)
+            traceback.print_exc()
             mensagem = str(exc)
             if "Target page, context or browser has been closed" in mensagem:
                 mensagem = "O navegador foi fechado durante a atualizacao. Use RECUPERAR GEMUL e tente novamente."
@@ -4779,6 +5127,7 @@ def obter_matricula():
                 f"Nao foi possivel atualizar a lista. A base anterior foi preservada.\n{mensagem}\n"
                 "Use ATUALIZAR ALUNOS para tentar novamente.", parent=root,
             )
+            return False
 
     def solicitar_matricula_inicial() -> bool:
         while True:
@@ -4888,6 +5237,7 @@ def obter_matricula():
             return False
 
         registro = historicos_por_ano[ano_chave]
+        dados.pop("ano_sem_historico", None)
         bloqueio_auto["ativo"] = True
         try:
             ano_var.set(registro.get("ano", ano_chave))
@@ -4962,7 +5312,7 @@ def obter_matricula():
         historicos_por_ano.clear()
         historicos_por_ano.update(construir_historicos_por_ano(resultado_ia))
         anos_disponiveis = list(historicos_por_ano.keys())
-        ano_combobox["values"] = anos_disponiveis
+        ano_combobox["values"] = sorted(set(anos_disponiveis) | {str(datetime.now().year)})
 
         if anos_disponiveis:
             ano_preferido = extrair_ano_4_digitos(resultado_ia.get("ano", "")) or anos_disponiveis[0]
@@ -5087,6 +5437,8 @@ def obter_matricula():
             resultado_cache = payload_cache_ocr["resultado_ia"]
             salvo_em = str(payload_cache_ocr.get("salvo_em", "") or "").strip()
             preencher_formulario_com_ia(resultado_cache)
+            salvar_cache_historico_por_matricula(numero_matricula_var.get(), resultado_cache, caminhos_scan)
+            salvar_cache_formulario_por_matricula(numero_matricula_var.get(), coletar_dados_formulario())
             status_scan_var.set(
                 f"Leitura IA restaurada do cache local"
                 f"{f' de {salvo_em}' if salvo_em else ''}."
@@ -5119,6 +5471,8 @@ def obter_matricula():
         atualizar_indicador_ocr()
         root.update_idletasks()
 
+        matricula_leitura = numero_matricula_var.get()
+
         def worker_ia():
             try:
                 resultado_ia = extrair_campos_historico_com_openai(caminhos_processados, model=modelo_ia)
@@ -5141,10 +5495,16 @@ def obter_matricula():
                         pass
 
             def aplicar_resultado():
+                if numero_matricula_var.get() != matricula_leitura:
+                    salvar_cache_historico_por_matricula(matricula_leitura, resultado_ia, caminhos_scan)
+                    salvar_cache_ocr_arquivos(chave_cache_ocr, resultado_ia, caminhos_scan, modelo_ia)
+                    finalizar_indicador_ocr("Leitura salva para a matricula original")
+                    return
                 preencher_formulario_com_ia(resultado_ia)
                 matricula_cache = re.sub(r"\D", "", str(numero_matricula_var.get() or resultado_ia.get("numero_matricula", "") or "").strip())
                 try:
                     salvar_cache_historico_por_matricula(matricula_cache, resultado_ia, caminhos_scan)
+                    salvar_cache_formulario_por_matricula(matricula_cache, coletar_dados_formulario())
                 except Exception as exc:
                     print(f"Falha ao persistir cache do historico para a matricula {matricula_cache}: {exc}")
                 try:
@@ -5249,7 +5609,7 @@ def obter_matricula():
     ttk.Entry(root, textvariable=nome_aluno_var, width=45).grid(row=0, column=3, padx=10, pady=5, columnspan=3, sticky="we")
 
     ttk.Label(root, text="Ano:").grid(row=1, column=0, padx=10, pady=5)
-    ano_combobox = ttk.Combobox(root, textvariable=ano_var)
+    ano_combobox = ttk.Combobox(root, textvariable=ano_var, values=[str(datetime.now().year)])
     ano_combobox.grid(row=1, column=1, padx=10, pady=5, sticky="we")
     ttk.Label(root, text="Arquivo(s) do Historico:").grid(row=1, column=2, padx=10, pady=5, sticky="e")
     ttk.Entry(root, textvariable=arquivo_scan_var, width=45).grid(row=1, column=3, padx=10, pady=5, sticky="we")
@@ -5338,9 +5698,10 @@ def obter_matricula():
         entry_widget.grid_remove()
         disciplina_widgets.append((label_widget, entry_widget))
 
-    ttk.Checkbutton(root, text='Gerar cobrança de histórico', variable=gerar_cobranca_var,
-                    command=abrir_cobranca_historico).grid(
-        row=18, column=0, columnspan=2, padx=10, pady=5, sticky='w')
+    area_cobranca = ttk.LabelFrame(root, text='Cobrança de histórico', padding=8)
+    area_cobranca.grid(row=18, column=0, columnspan=2, padx=10, pady=5, sticky='we')
+    ttk.Button(area_cobranca, text='Iniciar Protocolo de Cobrança de Histórico',
+               command=abrir_cobranca_historico).pack(fill='x')
 
     def encerrar_aplicacao():
         monitoramento_navegador["ativo"] = False
@@ -5391,6 +5752,15 @@ def obter_matricula():
     ttk.Button(root, text="RESET", command=resetar_formulario).grid(row=22, column=0, columnspan=6, pady=(0, 10))
     ttk.Button(root, text="ATUALIZAR ALUNOS", command=lambda: atualizar_base_alunos(forcar=True)).grid(
         row=23, column=0, columnspan=6, pady=(0, 10))
+    def esquecer_credenciais_gemul():
+        try:
+            credenciais_locais.esquecer()
+        except OSError as exc:
+            messagebox.showerror('Credenciais', f'Não foi possível apagar as credenciais salvas:\n{exc}', parent=root)
+            return
+        messagebox.showinfo('Credenciais', 'Credenciais esquecidas. No próximo acesso, informe o usuário e a senha.', parent=root)
+    ttk.Button(root, text='Esquecer credenciais GEMUL', command=esquecer_credenciais_gemul).grid(
+        row=24, column=0, columnspan=6, pady=(0, 8))
     root.protocol("WM_DELETE_WINDOW", encerrar_aplicacao)
 
     entrada_frame = ttk.Frame(root)
@@ -5418,6 +5788,8 @@ def obter_matricula():
     if not solicitar_matricula_inicial():
         root.destroy()
         return dados
+
+    garantir_aluno_transferido()
 
     if not aplicar_cache_formulario_da_matricula(numero_matricula_var.get(), atualizar_status=True):
         aplicar_cache_historico_da_matricula(numero_matricula_var.get(), atualizar_status=True)
@@ -5503,8 +5875,18 @@ class ProcessamentoDeObservacoes:
         self._marcar_resolucao_011_completa_exibida()
         return texto
 
-    def _aplicar_observacao_primeiro_segundo_ano_aparecida(self, texto, serie):
-        if not self._eh_primeiro_ou_segundo_ano(serie):
+    def _aplicar_observacao_primeiro_segundo_ano_aparecida(self, texto, serie, ano, cidade):
+        if cidade != "APARECIDA DE GOIANIA" or not self._eh_primeiro_ou_segundo_ano(serie):
+            return texto
+        if ano >= 2026:
+            for trecho in (
+                APARECIDA_OBSERVACAO_1O_2O_ANO,
+                " Aluno(a) avaliado(a) através de Ficha Descritiva em anexo.",
+                " Aluno(a) avaliado(a) através de Ficha Descritiva, em anexo.",
+            ):
+                texto = texto.replace(trecho, "")
+            if APARECIDA_RESOLUCAO_016_2026_TEXTO not in texto:
+                texto = texto.rstrip() + " " + APARECIDA_RESOLUCAO_016_2026_TEXTO
             return texto
         if APARECIDA_OBSERVACAO_1O_2O_ANO.strip() in texto:
             return texto
@@ -5602,9 +5984,18 @@ class ProcessamentoDeObservacoes:
             texto = self.processa_ano_padrao(escola, cidade, ja_estudou, ficha_descritiva, observacoes)
 
         texto = corrigir_texto_utf8(texto)
+        if cidade == "APARECIDA DE GOIANIA":
+            # Keep the base reference requested for every local history, alongside earlier norms.
+            if not any(trecho in texto for trecho in (
+                APARECIDA_RESOLUCAO_011_TEXTO_BASE, APARECIDA_RESOLUCAO_011_TEXTO_RESUMO,
+                APARECIDA_RESOLUCAO_011_TRECHO_SEM_PREFIXO, APARECIDA_RESOLUCAO_011_TRECHO_SEM_PREFIXO_RESUMO,
+                APARECIDA_RESOLUCAO_011_TEXTO_CURTO,
+            )):
+                texto = texto.rstrip() + " " + APARECIDA_RESOLUCAO_011_TEXTO_BASE
         texto = self._aplicar_resumo_resolucao_011_se_repetida(texto)
-        texto = self._aplicar_observacao_primeiro_segundo_ano_aparecida(texto, serie)
-        return self._aplicar_observacao_agrupamento_aparecida(texto, serie, escola, cidade)
+        texto = self._aplicar_observacao_primeiro_segundo_ano_aparecida(texto, serie, ano, cidade)
+        texto = self._aplicar_observacao_agrupamento_aparecida(texto, serie, escola, cidade)
+        return mover_continuidade_estudos_para_final(texto)
     
     def processa_ano_menor_2019(self, escola, cidade, ja_estudou, ficha_descritiva, observacoes):
         # Condição 1: Se 'escola' for 'ESCOLA MUNICIPAL JARDIM BELA VISTA'
@@ -5814,6 +6205,16 @@ class ProcessamentoDeObservacoes:
                     return f"{observacoes} Histórico transcrito conforme o original."
         return "Nenhuma observação. Histórico transcrito conforme o original."
 
+def mover_continuidade_estudos_para_final(texto):
+    padrao = r"Aluno\(a\)\s+apto\(a\)\s+a\s+dar\s+continuidade\s+aos\s+estudos\s+no\s+[^.\n!?]+[.!?]?"
+    trechos = list(dict.fromkeys(match.group().strip() for match in re.finditer(padrao, texto, re.IGNORECASE)))
+    if not trechos:
+        return texto
+    restante = re.sub(padrao, '', texto, flags=re.IGNORECASE)
+    restante = re.sub(r'[ \t]{2,}', ' ', restante).strip()
+    return ' '.join([parte for parte in [restante, *trechos] if parte])
+
+
 def escrever_observacoes(driver, ano, nome_escola, cidade, ja_estudou, ficha_descritiva, txt_observacoes, serie, carga_horaria, txt_observacoes_gerais=""):
     # Cria uma instÃ¢ncia da classe ProcessamentoDeObservacoes
     processamento = ProcessamentoDeObservacoes()
@@ -5821,6 +6222,8 @@ def escrever_observacoes(driver, ano, nome_escola, cidade, ja_estudou, ficha_des
     # Chama a funÃ§Ã£o decisao_texto para gerar o texto baseado nas condiÃ§Ãµes
     observacoes_geradas = processamento.decisao_texto(ano, nome_escola, cidade, ja_estudou, ficha_descritiva, txt_observacoes, serie)
     observacoes_geradas = mesclar_textos_observacao(corrigir_texto_utf8(observacoes_geradas), txt_observacoes)
+    observacoes_geradas = disciplinas_historico.limpar_observacao(observacoes_geradas)
+    observacoes_geradas = mover_continuidade_estudos_para_final(observacoes_geradas)
     
     # Adiciona um print para verificar o texto gerado
     print(f"Texto gerado para observaÃ§Ãµes: {observacoes_geradas}")
@@ -5829,9 +6232,11 @@ def escrever_observacoes(driver, ano, nome_escola, cidade, ja_estudou, ficha_des
     FuncoesDoPrograma.escrever_texto(driver, '//*[@id="txtCHTotal"]', carga_horaria)
     
     # Verifica se o campo de observaÃ§Ãµes estÃ¡ disponÃ­vel antes de escrever o texto
-    texto_geral = corrigir_texto_utf8(txt_observacoes_gerais or "").strip()
-    if texto_geral:
-        FuncoesDoPrograma.escrever_texto(driver, '//*[@id="txtObservacaoGeral"]', texto_geral)
+    # General OCR notes remain available only in the local review form.
+    pagina = _get_base(driver)
+    campo_geral = pagina.locator('#txtObservacaoGeral')
+    if campo_geral.count():
+        campo_geral.fill('')
 
     try:
         FuncoesDoPrograma.escrever_texto(driver, '//*[@id="txtObservacao"]', observacoes_geradas)

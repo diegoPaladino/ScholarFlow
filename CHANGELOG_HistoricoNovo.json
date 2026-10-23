@@ -4,6 +4,146 @@
   "orientacao": "Sempre que o codigo for alterado, adicionar uma nova entrada em 'alteracoes' com data, resumo, arquivos e impactos.",
   "alteracoes": [
     {
+      "data": "2026-10-23",
+      "tipo": "ponto de recuperacao antes das proximas alteracoes",
+      "arquivos": [
+        "main.py",
+        "disciplinas_historico.py",
+        "cobranca_historico.py",
+        "test_interface_fixes.py",
+        "test_disciplinas_historico.py",
+        "test_extra_disciplinas.py",
+        "test_cobranca_historico.py"
+      ],
+      "resumo": [
+        "Grava notas na tela nova do GEMUL, compara valores numericos equivalentes e confirma persistencia apos recarregar.",
+        "Preserva disciplinas extras por ano, lanca as encontradas no catalogo e registra as ausentes nas observacoes.",
+        "Remove notas redundantes das observacoes e mantem a observacao geral somente para conferencia local.",
+        "Confirma o curso exibido apos navegacao sem repetir uma selecao ja correta.",
+        "Recupera a leitura IA completa e o ultimo formulario por matricula, salvando os resultados imediatamente.",
+        "Inclui contatos cadastrados no TXT de cobranca em formato https://wa.me/55, sem duplicatas.",
+        "Mantem o ano corrente na lista e limpa notas, extras e observacoes ao seleciona-lo, preservando os historicos anteriores."
+      ],
+      "validacao": [
+        "95 testes aprovados com python -m unittest discover -q.",
+        "git diff --check sem erros."
+      ]
+    },
+    {
+      "data": "2026-10-20",
+      "tipo": "persistencia do login e ordem final das observacoes",
+      "arquivos": [
+        "main.py",
+        "test_credenciais_login.py",
+        "test_resolucoes_observacoes.py",
+        "verificar_observacoes.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Memoriza credenciais apos login que redireciona para selecao de escola, alem do acesso direto ao modulo academico.",
+        "Reutiliza as credenciais protegidas pelo Windows sem solicitar dialogo em cada execucao; acesso recusado permite correcao manual.",
+        "Inclui botao para esquecer credenciais locais na interface.",
+        "Posiciona a frase de continuidade dos estudos ao final das observacoes, depois das resolucoes e dos complementos manuais, removendo copias identicas."
+      ],
+      "validacao": [
+        "54 testes aprovados, incluindo redirecionamento para selecao de escola, login recusado, reuso sem dialogo e ordem das observacoes.",
+        "Verificacao isolada de observacoes e compilacao aprovadas."
+      ],
+      "limitacoes": [
+        "O proximo acesso autenticado deve confirmar a gravacao das credenciais reais; estas nao foram lidas nem inseridas nos testes."
+      ]
+    },
+    {
+      "data": "2026-10-20",
+      "tipo": "conferencia de transferencia e resolucao do ciclo de alfabetizacao",
+      "arquivos": [
+        "main.py",
+        "student_transfer.py",
+        "test_student_transfer.py",
+        "test_resolucoes_observacoes.py",
+        "test_workflow_guards.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Confere a situacao do aluno consultado, antes do lancamento e antes da cobranca; situacoes diferentes de TRANSFERIDO abrem a pagina de alteracao na sessao autenticada.",
+        "Aguarda intervencao manual e exige nova coleta da base para confirmar TRANSFERIDO; cancelamento ou falha de atualizacao mantem o lancamento bloqueado.",
+        "Acrescenta a Resolucao CME 16/2026 para 1o e 2o anos de Aparecida a partir de 2026, conforme texto e regra fornecidos pelo usuario.",
+        "Mantem a Resolucao 011/2019 nos historicos locais, completa na primeira citacao e resumida nas seguintes, preservando as outras normas existentes.",
+        "Retira a observacao automatica de Ficha Descritiva com nota apenas em Educacao Fisica dos 1o e 2o anos de Aparecida a partir de 2026."
+      ],
+      "validacao": [
+        "45 testes automatizados e verificacoes isoladas de navegacao e observacoes aprovados."
+      ],
+      "limitacoes": [
+        "Fluxo da alteracao manual ainda requer validacao interativa no GEMUL. A regra e a redacao da Resolucao 16/2026 foram fornecidas pelo usuario."
+      ]
+    },
+    {
+      "data": "2026-10-20",
+      "tipo": "compatibilidade dos cabecalhos de telefone do relatorio",
+      "arquivos": [
+        "student_sync.py",
+        "test_student_sync.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Reconhece titulos curtos e abreviados das quatro colunas de telefone, incluindo Celular, Comercial, Residencial, Responsavel e Tel.",
+        "Confere a selecao efetiva das colunas antes de gerar o relatorio.",
+        "Registra apenas os rotulos do cabecalho reconhecido quando a validacao falha, sem imprimir linhas de alunos."
+      ],
+      "validacao": [
+        "33 testes aprovados, incluindo abreviacoes, colunas reordenadas e preservacao dos valores."
+      ],
+      "limitacoes": [
+        "O log da falha original confirmou a etapa, mas nao continha os titulos recebidos. Nova coleta autenticada ainda precisa confirmar a compatibilidade com o relatorio atual."
+      ]
+    },
+    {
+      "data": "2026-10-20",
+      "tipo": "diagnostico da atualizacao diaria de alunos",
+      "arquivos": [
+        "main.py",
+        "student_sync.py",
+        "test_student_sync.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Registra falhas da atualizacao com traceback e tipo de erro no log principal.",
+        "Registra etapa da coleta, URL do relatorio, selecao dos quatro telefones e total de registros em caso de sucesso.",
+        "Informa colunas ausentes na tabela e opcoes de coluna ausentes no formulario, preservando a base anterior."
+      ],
+      "validacao": [
+        "30 testes automatizados aprovados.",
+        "Base existente sem campos de telefone confirmada como desatualizada, mesmo com registro no dia atual."
+      ],
+      "limitacoes": [
+        "A falha relatada nao havia sido gravada no log antigo; a causa precisa de nova tentativa com o diagnostico corrigido."
+      ]
+    },
+    {
+      "data": "2026-10-20",
+      "tipo": "protocolo de cobranca de historico via WhatsApp",
+      "arquivos": [
+        "main.py",
+        "cobranca_historico.py",
+        "test_cobranca_historico.py",
+        ".gitignore",
+        "README.md"
+      ],
+      "resumo": [
+        "Area exclusiva com botao de inicio e texto padrao da secretaria.",
+        "Selecao de telefones da base diaria por matricula, com normalizacao, deduplicacao e identificacao da origem.",
+        "Abertura de link wa.me em nova aba no navegador indicado; texto restaurado no clipboard para colagem manual.",
+        "Botoes utilizados ficam cinza e persistem localmente por aluno e telefone."
+      ],
+      "validacao": [
+        "28 testes automatizados aprovados."
+      ],
+      "limitacoes": [
+        "Fluxo visual com WhatsApp requer validacao interativa; abertura do link nao confirma envio."
+      ]
+    },
+    {
       "data": "2026-10-20",
       "tipo": "consolidacao das melhorias e preparacao para novas funcionalidades",
       "arquivos": [

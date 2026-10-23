@@ -52,6 +52,62 @@ class StudentSyncTests(unittest.TestCase):
             with self.subTest(tables=tables), self.assertRaises(ValueError):
                 sync.extrair_registros(tables)
 
+    def test_old_report_identifies_missing_phone_columns(self):
+        with self.assertRaises(ValueError) as error:
+            sync.extrair_registros([[HEADERS[:-4], ROW[:-4]]])
+        for field in ('telefone_celular', 'telefone_comercial', 'telefone_residencial', 'telefone_responsavel'):
+            self.assertIn(field, str(error.exception))
+        self.assertNotIn('ALUNA TESTE', str(error.exception))
+
+    def test_abbreviated_report_phone_headers(self):
+        for phones in (
+            ['Celular', 'Comercial', 'Residencial', 'Respons\u00e1vel'],
+            ['Tel. Celular', 'Tel. Comercial', 'Tel. Residencial', 'Tel. Respons\u00e1vel'],
+            ['Fone Celular', 'Fone Comercial', 'Fone Residencial', 'Fone Responsavel'],
+            ['Tel. Cel.', 'Tel. Com.', 'Tel. Resid.', 'Tel. Resp.'],
+        ):
+            with self.subTest(phones=phones):
+                record = sync.extrair_registros([[HEADERS[:-4] + phones, ROW]])[0]
+                self.assertEqual(record['telefone_celular'], ROW[-4])
+                self.assertEqual(record['telefone_comercial'], '')
+                self.assertEqual(record['telefone_residencial'], ROW[-2])
+                self.assertEqual(record['telefone_responsavel'], ROW[-1])
+
+    def test_reordered_abbreviated_phone_columns_keep_their_values(self):
+        order = [14, 0, 12, 2, 1, 13, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        headers = HEADERS[:-4] + ['Celular', 'Comercial', 'Residencial', 'Responsavel']
+        record = sync.extrair_registros([[[headers[i] for i in order], [ROW[i] for i in order]]])[0]
+        self.assertEqual(record['telefone_responsavel'], ROW[-1])
+        self.assertEqual(record['telefone_celular'], ROW[-4])
+
+    def test_failure_logs_only_header_labels(self):
+        from unittest.mock import patch
+        headers = HEADERS[:-1] + ['Telefone desconhecido']
+        with patch('builtins.print') as log, self.assertRaises(ValueError):
+            sync.extrair_registros([[headers, ROW]])
+        logged = ' '.join(str(item) for item in log.call_args_list)
+        self.assertIn('Telefone desconhecido', logged)
+        self.assertNotIn('ALUNA TESTE', logged)
+        self.assertNotIn(ROW[-1], logged)
+
+    def test_refresh_failure_logs_stage_and_closes_report(self):
+        from unittest.mock import Mock
+        page = Mock()
+        page.is_closed.return_value = False
+        report = page.context.new_page.return_value
+        report.is_closed.return_value = False
+        report.url = sync.REPORT_URL
+        report.goto.side_effect = RuntimeError('teste de acesso')
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sync, 'verificar_espaco'), patch('builtins.print') as log:
+                with self.assertRaisesRegex(RuntimeError, 'teste de acesso'):
+                    sync.atualizar_base_diaria(page, directory, forcar=True)
+            logged = ' '.join(str(item) for item in log.call_args_list)
+            self.assertIn('abrir formulario do relatorio', logged)
+            self.assertIn('teste de acesso', logged)
+            report.close.assert_called_once()
+            self.assertFalse((Path(directory) / 'student_sync_state.json').exists())
+
     def test_save_backup_daily_state_and_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

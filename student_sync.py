@@ -25,10 +25,15 @@ FIELDS = {
     "mae": {"MAE", "NOME DA MAE", "NOME MAE"},
     "situacao": {"SITUACAO", "SITUACAO ALUNO", "SITUACAO DO ALUNO"},
     "turma": {"TURMA"},
-    "telefone_celular": {"TELEFONE CELULAR"},
-    "telefone_comercial": {"TELEFONE COMERCIAL"},
-    "telefone_residencial": {"TELEFONE RESIDENCIAL"},
-    "telefone_responsavel": {"TELEFONE RESPONSAVEL", "TELEFONE DO RESPONSAVEL"},
+    "telefone_celular": {"TELEFONE CELULAR", "TEL CELULAR", "FONE CELULAR", "CELULAR",
+                         "TELEFONE CEL", "TEL CEL"},
+    "telefone_comercial": {"TELEFONE COMERCIAL", "TEL COMERCIAL", "FONE COMERCIAL", "COMERCIAL",
+                           "TELEFONE COM", "TEL COM"},
+    "telefone_residencial": {"TELEFONE RESIDENCIAL", "TEL RESIDENCIAL", "FONE RESIDENCIAL", "RESIDENCIAL",
+                             "TELEFONE RES", "TEL RES", "TEL RESID"},
+    "telefone_responsavel": {"TELEFONE RESPONSAVEL", "TELEFONE DO RESPONSAVEL", "TEL RESPONSAVEL",
+                             "TEL DO RESPONSAVEL", "FONE RESPONSAVEL", "RESPONSAVEL",
+                             "TELEFONE RESP", "TEL RESP"},
 }
 CHECKBOXES = ("datamatricula", "dataafastamento", "datanascimento", "sexo",
               "naturalidade", "nomepai", "nomemae", "situacaoaluno", "turma",
@@ -70,6 +75,8 @@ def base_atualizada_hoje(base_dir):
 def extrair_registros(tabelas):
     """Accept only tables with all requested headers; never interpret a login/error as data."""
     registros = []
+    melhor_cabecalho = set()
+    rotulos_cabecalho = []
     for rows in tabelas:
         mapping = None
         for row in rows:
@@ -81,6 +88,11 @@ def extrair_registros(tabelas):
                         if field in found:
                             raise ValueError("Colunas duplicadas no relatorio.")
                         found[field] = index
+            if len(found) > len(melhor_cabecalho):
+                melhor_cabecalho = set(found)
+                # Only retain a recognizable header, never a student's data row.
+                if "matricula" in found and "nome" in found:
+                    rotulos_cabecalho = [str(cell).strip() for cell in row]
             if set(FIELDS).issubset(found):
                 mapping = found
                 continue
@@ -93,7 +105,13 @@ def extrair_registros(tabelas):
                 raise ValueError("Registro de aluno sem nome.")
             registros.append(record)
     if not registros:
-        raise ValueError("Relatorio sem tabela valida com as colunas solicitadas. A base anterior nao foi alterada.")
+        if rotulos_cabecalho:
+            print("ALUNOS: cabecalho recebido do relatorio: " + json.dumps(rotulos_cabecalho, ensure_ascii=False))
+        faltantes = [field for field in FIELDS if field not in melhor_cabecalho]
+        detalhe = (" Colunas ausentes: " + ", ".join(faltantes) + "."
+                   if faltantes else " Cabecalho reconhecido, mas nenhum registro valido foi encontrado.")
+        raise ValueError("Relatorio sem tabela valida com as colunas solicitadas." + detalhe +
+                         " A base anterior nao foi alterada.")
     unique = {}
     for record in registros:
         key = tuple(record.items())
@@ -159,11 +177,14 @@ def _selecionar(page, selector, value):
 
 def atualizar_base_diaria(pagina, base_dir, forcar=False):
     if not forcar and base_atualizada_hoje(base_dir):
+        print("ALUNOS: base de hoje conferida, incluindo as colunas de telefone; coleta dispensada.")
         return json.loads((Path(base_dir) / "student_sync_state.json").read_text())["registros"]
+    print(f"ALUNOS: iniciando coleta completa; forcar={forcar}; campos={','.join(FIELDS)}")
     verificar_espaco(base_dir)
     if pagina.is_closed() or not pagina.context.browser.is_connected():
         raise RuntimeError("Navegador fechado. Use RECUPERAR GEMUL e tente atualizar novamente.")
     page = pagina.context.new_page()
+    etapa = "abrir formulario do relatorio"
     try:
         page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=60000)
         page.locator("#frm #txtAnoLetivo").wait_for(state="visible", timeout=15000)
@@ -173,6 +194,7 @@ def atualizar_base_diaria(pagina, base_dir, forcar=False):
             page.locator("#txtAnoLetivo").fill(year)
             with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
                 page.locator("#txtAnoLetivo").press("Tab")
+        etapa = "configurar filtros do relatorio"
         _selecionar(page, "#cmbTipoTurma", "ESC")
         _selecionar(page, "#cmbSemestre", "3")
         # Include every course, class and student situation, including transferred students.
@@ -185,18 +207,36 @@ def atualizar_base_diaria(pagina, base_dir, forcar=False):
         page.locator("#cmbOrdem").select_option(value="matricula")
         page.locator("#cmbQuebraPagina").select_option(value="NORMAL")
         page.locator("#cmblpp").select_option(value="0")
+        etapa = "selecionar colunas do relatorio"
         boxes = page.locator('#frm input[type="checkbox"]:not([disabled])')
+        disponiveis = {boxes.nth(index).get_attribute("name") for index in range(boxes.count())}
+        ausentes = set(CHECKBOXES) - disponiveis
+        if ausentes:
+            raise ValueError("Opcoes de coluna nao encontradas no formulario: " + ", ".join(sorted(ausentes)))
         for index in range(boxes.count()):
             box = boxes.nth(index)
             box.set_checked(box.get_attribute("name") in CHECKBOXES)
+        selecionadas = {boxes.nth(index).get_attribute("name")
+                        for index in range(boxes.count()) if boxes.nth(index).is_checked()}
+        if selecionadas != set(CHECKBOXES):
+            raise ValueError("O formulario nao manteve a selecao das colunas solicitadas. Tente atualizar novamente.")
+        print("ALUNOS: colunas selecionadas, incluindo os quatro telefones.")
+        etapa = "gerar relatorio no GEMUL"
         with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
             page.get_by_role("button", name="Gerar Relatório", exact=True).click()
         page.locator("table").first.wait_for(state="attached", timeout=15000)
         tables = page.locator("table").evaluate_all("""tables => tables.map(table =>
             Array.from(table.rows).map(row => Array.from(row.cells).map(cell => cell.innerText.trim())))""")
+        etapa = "validar colunas e registros do relatorio gerado"
         records = extrair_registros(tables)
+        etapa = "salvar CSVs e registro diario"
         salvar_base(base_dir, records)
+        print(f"ALUNOS: coleta concluida; registros={len(records)}; telefones incluidos nos dois CSVs.")
         return len(records)
+    except Exception as exc:
+        print("ALUNOS: " + json.dumps({"etapa": etapa, "url": page.url,
+                                       "tipo_erro": type(exc).__name__, "erro": str(exc)}, ensure_ascii=False))
+        raise
     finally:
         # Cleanup must not hide the original report/storage error.
         try:
