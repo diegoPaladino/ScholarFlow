@@ -5,6 +5,83 @@
   "alteracoes": [
     {
       "data": "2026-10-23",
+      "tipo": "boletins de outras unidades e disciplinas padrao do GEMUL",
+      "arquivos": [
+        "boletim_bimestral.py",
+        "main.py",
+        "test_boletim_bimestral.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Aceita matricula diferente no boletim de origem, preservando-a em numero_matricula_origem e vinculando o cache e o destino a matricula selecionada no GEMUL.",
+        "Mantem a validacao pelo nome do aluno e impede a reutilizacao de um cache ja vinculado para outra matricula do GEMUL.",
+        "Ignora disciplinas fora do padrao do GEMUL e disciplinas ausentes no catalogo da turma, sem escrever observacoes nem interromper as demais notas.",
+        "Normaliza Arte para Artes sem confundir Matematica Ludica com Matematica ou Leitura e Fluencia com Lingua Portuguesa.",
+        "Reforca a leitura de diferentes modelos e fichas individuais com cabecalhos em multiplas linhas, NT/Nota, CH, CONS e MD; preserva zeros e ignora tracos e celulas vazias.",
+        "Filtra materias nao padronizadas tambem na revisao de boletins em cache e exibe separadamente a matricula da escola de origem."
+      ],
+      "validacao": [
+        "122 testes aprovados com python -m unittest discover -q.",
+        "Cobertura de matricula estrangeira separada da matricula GEMUL, persistencia da origem, nome divergente e bloqueio da troca de matricula de cache normalizado.",
+        "Teste de ficha individual com sete disciplinas padrao, duas notas por disciplina, aliases, materias extras, tracos e bimestres vazios.",
+        "Teste de navegador confirma que materias fora do padrao ou ausentes na turma sao ignoradas sem impedir os demais lancamentos.",
+        "Compilacao dos modulos alterados e git diff --check aprovados."
+      ]
+    },
+    {
+      "data": "2026-10-23",
+      "tipo": "lancamento completo de notas bimestrais no GEMUL",
+      "arquivos": [
+        "boletim_bimestral.py",
+        "main.py",
+        "test_boletim_bimestral.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Usa o ano corrente e a turma do cadastro vinculada a matricula, seleciona a disciplina e Todas as Situacoes para incluir alunos transferidos.",
+        "Desmarca os demais alunos e seleciona somente a matricula em tratamento antes de abrir Cadastrar.",
+        "Confere ano, turma, disciplina, matricula, codigo interno e quantidade unica de alunos na pagina de notas.",
+        "Lanca os bimestres de todas as disciplinas revisadas, preservando bimestres ausentes, recuperacao e conselho de classe.",
+        "Associa ao formulario os metadados ocultos presentes apos o fechamento do form na captura fornecida, mantendo os campos nativos no envio.",
+        "Reabre cada disciplina para verificar a persistencia; repeticoes nao reenviam valores identicos e falhas informam disciplinas confirmadas e pendentes.",
+        "Inclui botao Lancar notas do boletim na janela de revisao e bloqueia o envio de boletins de anos anteriores para o ano corrente."
+      ],
+      "validacao": [
+        "117 testes aprovados com python -m unittest discover -q.",
+        "Fluxo de navegador exercitado com os formularios e scripts dos HTMLs fornecidos, usando matriculas ficticias e interceptacao local de rede.",
+        "Cobertura de aluno transferido, selecao exclusiva da matricula, turma do cadastro, preservacao de campos, repeticao sem reenvio, matricula incorreta/duplicada, materia ausente, ausencia de persistencia e falha parcial.",
+        "Compilacao dos modulos, correspondencia de turma com ordinal e git diff --check aprovados."
+      ]
+    },
+    {
+      "data": "2026-10-23",
+      "tipo": "comparacao por divergencias, edicao de observacoes e leitura independente de boletim",
+      "arquivos": [
+        "main.py",
+        "disciplinas_historico.py",
+        "boletim_bimestral.py",
+        "test_documento_comparacao.py",
+        "test_boletim_bimestral.py",
+        "test_extra_disciplinas.py",
+        "test_disciplinas_historico.py",
+        "README.md"
+      ],
+      "resumo": [
+        "Reconhece controles de edicao do historico em links e icones, alem de botoes, preservando a identificacao do registro por ano, serie e escola.",
+        "Separa notas confirmadas de observacoes pendentes, sem declarar falha total nem afirmar gravacao de observacoes nao confirmadas.",
+        "Exibe somente divergencias e campos ausentes na comparacao documental; normaliza a soma dos pesos para o intervalo zero a um.",
+        "Compara naturalidade com UF opcional sem esconder divergencias quando ambas as fontes informam estados diferentes.",
+        "Adiciona campo independente de boletim bimestral, recorte para IA, revisao editavel, validacao de notas e cache por matricula e ano.",
+        "Abre os filtros de turma e disciplina do boletim no GEMUL. A gravacao automatica das notas bimestrais permanece pendente do HTML da tela posterior a Cadastrar; a captura fornecida contem apenas filtros."
+      ],
+      "validacao": [
+        "108 testes aprovados com python -m unittest discover -q.",
+        "Compilacao dos modulos alterados e git diff --check aprovados.",
+        "Testes de navegador cobrem links de edicao por icone e filtros do boletim sem envio de notas. Gravacao bimestral real depende da captura da tela com os campos de notas."
+      ]
+    },
+    {
+      "data": "2026-10-23",
       "tipo": "ponto de recuperacao antes das proximas alteracoes",
       "arquivos": [
         "main.py",

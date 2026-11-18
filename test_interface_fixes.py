@@ -179,7 +179,9 @@ class YearSelectionTests(unittest.TestCase):
             definir_texto_observacoes=Mock(), definir_texto_observacoes_gerais=Mock(),
             observacoes_var=Mock(), marcar_disciplinas_var=Mock(), ficha_descritiva_var=Mock(),
             cursando_var=Mock(), mostrar_disciplinas=Mock(), on_transfer_date_change=Mock(),
-            aplicar_historico_por_ano=Mock(return_value=True))
+            data_transferencia_var=Mock(get=Mock(return_value='')),
+            validar_data=lambda value: bool(__import__('re').fullmatch(r'\d{2}/\d{2}/\d{4}', value)),
+            aplicar_historico_por_ano=Mock(return_value=True), aplicar_escola_serie_ano_corrente=Mock())
         exec(compile(ast.Module(body=[node], type_ignores=[]), '<year-change>', 'exec'), self.env)
 
     def test_selecting_current_year_clears_fields_even_with_ocr_for_that_year(self):
@@ -194,6 +196,12 @@ class YearSelectionTests(unittest.TestCase):
         self.env['cursando_var'].set.assert_called_once_with(True)
         self.assertEqual(self.histories[self.previous]['nota_arte'], '9.5')
         self.env['aplicar_historico_por_ano'].assert_not_called()
+
+    def test_current_year_with_departure_is_not_studying(self):
+        self.env['ano_var'].get.return_value = self.current
+        self.env['data_transferencia_var'].get.return_value = '01/10/' + self.current
+        self.env['on_ano_change']()
+        self.env['cursando_var'].set.assert_called_once_with(False)
 
     def test_selecting_past_year_restores_its_saved_history(self):
         self.env['ano_var'].get.return_value = self.previous

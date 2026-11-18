@@ -17,6 +17,7 @@ class ExtraPipelineTests(unittest.TestCase):
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         self.module = Mock()
         self.env = dict(Dict=Dict, Any=Any, normalizar_texto_busca=normalizar,
+            PlaywrightError=RuntimeError,
             DISCIPLINA_EQUIVALENCIAS={'MATEMATICA': 'nota_matematica'},
             converter_conceitos_em_observacoes=lambda x: x,
             extrair_ano_4_digitos=lambda x: str(x), normalizar_serie=lambda x: x,
@@ -55,6 +56,15 @@ class ExtraPipelineTests(unittest.TestCase):
             self.assertTrue(disciplinas_historico.notas_equivalentes(grade, '8.000'))
         self.assertFalse(disciplinas_historico.notas_equivalentes('8', '8.1'))
         self.assertFalse(disciplinas_historico.notas_equivalentes('', '0'))
+
+    def test_observation_failure_reports_partial_result_after_confirmed_grades(self):
+        self.module.cadastrar.return_value = 2
+        self.module.acrescentar_observacao.side_effect = RuntimeError('Edicao indisponivel')
+        dados = dict(numero_matricula='202626234', serie='3 ANO', nome_escola='ESCOLA')
+        quantidade = self.env['cadastrar_disciplinas_com_extras'](Mock(), '2024', dados)
+        self.assertEqual(quantidade, 2)
+        self.assertIn('Notas confirmadas', dados['aviso_observacoes'])
+        self.assertIn('Edicao indisponivel', dados['aviso_observacoes'])
 
 
 class ObservationFilterTests(unittest.TestCase):

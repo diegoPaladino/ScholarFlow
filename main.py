@@ -6,6 +6,7 @@ import whatsapp_posicao
 import cobranca_historico
 import student_transfer
 import disciplinas_historico
+import boletim_bimestral
 from student_sync import atualizar_base_diaria, base_atualizada_hoje, verificar_espaco
 from datetime import datetime
 import json
@@ -27,7 +28,7 @@ import os
 import tempfile
 import winsound
 import hashlib
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 
 def _int_env(nome: str, padrao: int) -> int:
     try:
@@ -1076,10 +1077,31 @@ class FuncoesDoPrograma:
                     raise
                 time.sleep(0.3)
 
+    def normalizar_carga_horaria(valor):
+        from decimal import Decimal, ROUND_HALF_UP
+
+        texto = str(valor if valor is not None else '').strip().lower()
+        duracao = re.fullmatch(
+            r'(\d+)\s*(?:h(?:oras?)?\.?|:)\s*(?:(\d{1,2})\s*(?:min(?:utos?)?\.?)?)?', texto)
+        if duracao:
+            minutos = int(duracao.group(2) or 0)
+            if minutos >= 60 or (':' in texto and duracao.group(2) is None):
+                raise ValueError('Os minutos da carga horária devem estar entre 00 e 59.')
+            horas = Decimal(duracao.group(1)) + Decimal(minutos) / 60
+        else:
+            numero = re.fullmatch(r'(\d+(?:[.,]\d+)?)\s*(?:h(?:oras?)?\.?)?', texto)
+            if not numero:
+                raise ValueError('Informe uma carga horária válida, maior que zero, antes de lançar.')
+            horas = Decimal(numero.group(1).replace(',', '.'))
+        # O GEMUL aceita até quatro algarismos, sem separador de minutos/decimais.
+        inteiro = int(horas.quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        if not 1 <= inteiro <= 9999:
+            raise ValueError('A carga horária deve resultar em 1 a 9999 horas inteiras no GEMUL.')
+        return str(inteiro)
+
     def preencher_carga_horaria(driver, valor, timeout_ms=10000):
-        texto = str(valor if valor is not None else '').strip()
-        if not re.fullmatch(r'\d+(?:[.,]\d+)?', texto) or float(texto.replace(',', '.')) <= 0:
-            raise ValueError('Informe uma carga horária válida, maior que zero, antes de lançar.')
+        original = str(valor if valor is not None else '').strip()
+        texto = FuncoesDoPrograma.normalizar_carga_horaria(valor)
         campo = _build_locator(driver, By.XPATH, '//*[@id="txtCHTotal"]')
         _garantir_locator_visivel(driver, campo, timeout_ms=timeout_ms)
         campo.fill(texto)
@@ -1087,7 +1109,8 @@ class FuncoesDoPrograma:
         campo.press('Tab')
         FuncoesDoPrograma.conferir_carga_horaria(driver, texto)
         sessao_execucao['carga_horaria_esperada'] = texto
-        registrar_etapa_historico('carga_horaria_preenchida', _get_base(driver), carga_horaria=texto)
+        registrar_etapa_historico('carga_horaria_preenchida', _get_base(driver),
+                                 carga_horaria=texto, carga_horaria_original=original)
 
     def conferir_carga_horaria(driver, esperado):
         campo = _build_locator(driver, By.XPATH, '//*[@id="txtCHTotal"]')
@@ -1665,14 +1688,19 @@ def cadastrar_disciplinas_com_extras(pagina, ano, dados):
     if ausentes:
         texto = "Disciplinas do documento sem cadastro no GEMUL: " + "; ".join(
             f"{item['disciplina']}: {item['nota']}" for item in ausentes) + "."
-    disciplinas_historico.acrescentar_observacao(
-        pagina, f"{GEMUL_HISTORICO_URL}?txtMatricula={dados['numero_matricula']}",
-        ano, dados['serie'], dados['nome_escola'], texto, indice_registro_historico,
-        catalogo=resumo.get('catalogo', []), limpar_geral=True)
+    dados.pop("aviso_observacoes", None)
+    try:
+        disciplinas_historico.acrescentar_observacao(
+            pagina, f"{GEMUL_HISTORICO_URL}?txtMatricula={dados['numero_matricula']}",
+            ano, dados['serie'], dados['nome_escola'], texto, indice_registro_historico,
+            catalogo=resumo.get('catalogo', []), limpar_geral=True)
+    except (RuntimeError, PlaywrightError) as exc:
+        dados["aviso_observacoes"] = (
+            "Notas confirmadas no GEMUL. A revisao das observacoes ficou pendente: " + str(exc))
     partes = []
     if resumo.get("extras_lancadas"):
         partes.append("Disciplinas extras lancadas: " + "; ".join(resumo["extras_lancadas"]) + ".")
-    if ausentes:
+    if ausentes and not dados.get("aviso_observacoes"):
         partes.append("Registradas nas observacoes: " + "; ".join(
             f"{item['disciplina']}: {item['nota']}" for item in ausentes) + ".")
     dados["resumo_disciplinas_extra"] = "\n".join(partes)
@@ -2127,13 +2155,13 @@ def mesclar_textos_observacao(texto_base: str, complemento: str) -> str:
 def gerar_observacao_conceitos(conceitos_por_sigla: Dict[str, List[str]]) -> str:
     frases = []
     for sigla, disciplinas in conceitos_por_sigla.items():
-        lista_materias = juntar_lista_materias(disciplinas)
+        lista_materias = '; '.join(str(item).strip() for item in disciplinas if str(item).strip())
         if not lista_materias:
             continue
         if len(disciplinas) == 1:
-            frases.append(f'Aluno(a) recebeu o conceito "{sigla}" na materia {lista_materias}.')
+            frases.append(f'Aluno(a) recebeu o conceito "{sigla}" na matéria: {lista_materias}.')
         else:
-            frases.append(f'Aluno(a) recebeu o conceito "{sigla}" nas materias {lista_materias}.')
+            frases.append(f'Aluno(a) recebeu o conceito "{sigla}" nas matérias: {lista_materias}.')
     return " ".join(frases).strip()
 
 
@@ -2221,9 +2249,9 @@ def normalizar_serie(serie_bruta: str) -> str:
     serie_norm = normalizar_texto_busca(serie_texto)
     if not serie_norm:
         return ""
-    if "AGRUPAMENTO 4" in serie_norm:
+    if re.search(r"\bAGRUPAMENTO\s+(?:4|IV)\b", serie_norm):
         return "AGRUPAMENTO 4"
-    if "AGRUPAMENTO 5" in serie_norm:
+    if re.search(r"\bAGRUPAMENTO\s+(?:5|V)\b", serie_norm):
         return "AGRUPAMENTO 5"
     for numero in ("1", "2", "3", "4", "5"):
         if re.search(rf"\b{numero}\s*(?:O|{ORDINAL_INDICATOR})?\s*ANO\b", serie_norm):
@@ -2789,6 +2817,14 @@ def comparar_valor_documento(chave: str, valor_documento: Any, valor_csv: Any) -
         return normalizar_data_comparacao(doc) == normalizar_data_comparacao(csv_val)
     if chave == "sexo":
         return normalizar_texto_busca(doc)[:1] == normalizar_texto_busca(csv_val)[:1]
+    if chave == "naturalidade":
+        def cidade(valor):
+            texto = normalizar_texto_busca(valor)
+            uf = re.search(r"\s*[-/]\s*([A-Z]{2})$", texto)
+            return (texto[:uf.start()].strip(), uf.group(1)) if uf else (texto, '')
+        doc_cidade, doc_uf = cidade(doc)
+        csv_cidade, csv_uf = cidade(csv_val)
+        return doc_cidade == csv_cidade and (not doc_uf or not csv_uf or doc_uf == csv_uf)
     if chave == "nome_aluno":
         return difflib.SequenceMatcher(
             None,
@@ -2846,6 +2882,7 @@ def comparar_documento_com_rel_aluno(
             melhor_score = score
             melhor_registro = registro
 
+    melhor_score = min(1.0, max(0.0, melhor_score / (1.35 if origem == "matricula" else 1.10)))
     if not melhor_registro or (origem != "matricula" and melhor_score < 0.45):
         return {
             "registro": None,
@@ -2875,25 +2912,17 @@ def comparar_documento_com_rel_aluno(
                 divergentes.append(f"{rotulo} (doc: {valor_doc} / CSV: {valor_csv})")
         elif valor_doc or valor_csv:
             ausentes.append(rotulo)
+            divergentes.append(f"{rotulo}: documento = {valor_doc or 'nao informado'}; cadastro = {valor_csv or 'nao informado'}")
 
-    cabecalho = (
-        f"Comparacao com rel_aluno.csv por {'matricula' if origem == 'matricula' else 'similaridade'}: "
-        f"matricula {melhor_registro.get('matricula', '')} | "
-        f"aluno {melhor_registro.get('nome_aluno', '')}."
-    )
-    partes = [cabecalho]
-    if iguais:
-        partes.append("Campos coincidentes: " + ", ".join(iguais) + ".")
-    if divergentes:
-        partes.append("Divergencias: " + " | ".join(divergentes) + ".")
-    if ausentes:
-        partes.append("Campos sem comparacao completa: " + ", ".join(ausentes) + ".")
-    partes.append(f"Confianca estimada: {max(0.0, melhor_score):.0%}.")
+    resumo = ("Divergencias encontradas:\n\n" + "\n\n".join(divergentes)
+              if divergentes else "Nenhuma divergencia encontrada nos campos comparados.")
 
     return {
         "registro": melhor_registro,
         "score": melhor_score,
-        "resumo": " ".join(partes).strip(),
+        "resumo": resumo,
+        "divergencias": divergentes,
+        "ausentes": ausentes,
     }
 
 
@@ -3248,13 +3277,19 @@ OCR_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 OCR_SELECTOR_CANCELLED = object()
 
 
+def carregar_imagem_ocr(caminho_arquivo):
+    # Apply the Windows/photo viewer orientation to pixels before cropping or
+    # exporting a JPEG, which otherwise loses the source orientation metadata.
+    with Image.open(caminho_arquivo) as imagem_origem:
+        return ImageOps.exif_transpose(imagem_origem).convert('RGB')
+
+
 def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titulo: str) -> Any:
     extensao = os.path.splitext(str(caminho_arquivo or ""))[1].lower()
     if extensao not in OCR_IMAGE_EXTENSIONS:
         return None
 
-    with Image.open(caminho_arquivo) as imagem_origem:
-        imagem = imagem_origem.convert("RGB")
+    imagem = carregar_imagem_ocr(caminho_arquivo)
 
     largura_original, altura_original = imagem.size
     largura_tela = max(500, int(parent.winfo_screenwidth()) - 140)
@@ -3410,8 +3445,7 @@ def preparar_caminhos_para_ocr(
             caminhos_processados.append(caminho_limpo)
             continue
 
-        with Image.open(caminho_limpo) as imagem_origem:
-            imagem = imagem_origem.convert("RGB")
+        with carregar_imagem_ocr(caminho_limpo) as imagem:
             if recorte:
                 esquerda, topo, direita, baixo = recorte
                 esquerda = max(0, min(esquerda, imagem.width))
@@ -3521,7 +3555,9 @@ def extrair_campos_historico_com_openai(caminho_arquivo: Any, model: str = "") -
         "pelo documento e preserve o texto para revisao. "
         "Registre todas as disciplinas extras em disciplinas_extra, com disciplina e nota, "
         "sem repetir essas notas em txt_observacoes. Para conceitos, use a frase padrao "
-        "Aluno(a) recebeu o conceito \"SIGLA\" na materia NOME. "
+        "Aluno(a) recebeu o conceito \"SIGLA\" nas matérias: NOME; NOME. "
+        "Agrupe as matérias por conceito, sem repetir a sigla após cada matéria. "
+        "Quando houver conceitos diferentes, use uma frase por conceito, preservando cada avaliação. "
         "A observacao geral sera usada somente para conferencia local do usuario."
     )
     conteudo_usuario = [
@@ -3581,6 +3617,38 @@ def extrair_campos_historico_com_openai(caminho_arquivo: Any, model: str = "") -
         if chave not in resultado or resultado[chave] is None:
             resultado[chave] = [] if chave == "historicos" else ""
     return resultado
+
+
+def extrair_campos_boletim_com_openai(caminhos, model=""):
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY não configurada para leitura do boletim.")
+    conteudo = [{"type": "input_text", "text": (
+        "Leia somente o boletim bimestral. Extraia nome, matrícula quando presente, ano, turma e "
+        "cada nota com disciplina e bimestre (1 a 4). Preserve nota zero; não calcule médias, "
+        "não confunda notas finais, recuperação, faltas ou carga horária com notas bimestrais. "
+        "Há vários modelos: boletim, ficha individual do estudante/criança e tabelas com cabeçalhos em mais de uma linha. "
+        "Leia pelas colunas 1º, 2º, 3º e 4º bimestres e suas subcolunas NT/Nota. "
+        "CH é carga horária, CONS é conselho, MD é média: não são notas bimestrais. "
+        "Arte equivale a Artes. Não confunda Matemática Lúdica com Matemática nem Leitura e Fluência com Língua Portuguesa. "
+        "A matrícula impressa pertence à escola de origem; extraia-a como está, sem tentar convertê-la para o GEMUL. "
+        "Omita notas ausentes/ilegíveis, traços e células vazias; jamais transforme traço/vazio em zero. "
+        "Nunca invente informações. Use string vazia para campos ausentes."
+    )}]
+    conteudo.extend(construir_conteudo_usuario_arquivos_openai(
+        caminhos, limite_texto=120000,
+        rotulo_imagem="Boletim bimestral:\n", rotulo_pdf="Boletim bimestral PDF:\n"))
+    payload = {
+        "model": model or OCR_IA_MODEL_PADRAO,
+        "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
+        "input": [{"role": "user", "content": conteudo}],
+        "text": {"format": {"type": "json_schema", "name": "boletim_bimestral",
+                              "strict": True, "schema": boletim_bimestral.SCHEMA}},
+    }
+    corpo = enviar_requisicao_openai_com_retry(
+        url="https://api.openai.com/v1/responses", payload=payload, api_key=api_key,
+        timeout=OCR_IA_TIMEOUT_SEGUNDOS, tentativas=OCR_IA_TENTATIVAS)
+    return parse_json_seguro(extrair_texto_resposta_openai(json.loads(corpo)))
 
 
 def extrair_campos_documento_civil_com_openai(caminho_arquivo: Any, model: str = "") -> Dict[str, Any]:
@@ -3836,7 +3904,7 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
             if pagina.locator('#tbodyDisciplinas').count():
                 quantidade = cadastrar_disciplinas_com_extras(pagina, ano, dados)
                 registrar_etapa_historico('disciplinas_confirmadas', pagina, ano=ano, incluidas=quantidade)
-                return f'Historico existente: {quantidade} disciplinas incluidas; notas conferidas no GEMUL. ' + dados.get('resumo_disciplinas_extra', '')
+                return f'Historico existente: {quantidade} disciplinas incluidas; notas conferidas no GEMUL. ' + dados.get('resumo_disciplinas_extra', '') + '\n' + dados.get('aviso_observacoes', '')
         registrar_etapa_historico("duplicacao_bloqueada", pagina, ano=ano, serie=serie, escola=nome_escola)
         return f"Registro já existente: {ano}, {serie}, {nome_escola}. Nenhum dado foi incluído."
     if serie == "AGRUPAMENTO 4":
@@ -3860,10 +3928,49 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     mensagem = f"Lancamento concluido para {serie} em {duracao}."
     if dados.get("resumo_disciplinas_extra"):
         mensagem += "\n" + dados["resumo_disciplinas_extra"]
+    if dados.get("aviso_observacoes"):
+        mensagem += "\n" + dados["aviso_observacoes"]
     registrar_etapa_historico("concluido", pagina, ano=ano, serie=serie, duracao=duracao)
     print(mensagem)
     Atalho.alerta_sonoro()
     return mensagem
+
+
+def criar_area_formulario(janela):
+    # Reserve action space first; only the form scrolls on shorter screens.
+    acoes = ttk.Frame(janela, padding=(10, 6))
+    acoes.pack(side='bottom', fill='x')
+    area = ttk.Frame(janela)
+    area.pack(fill='both', expand=True)
+    area.grid_rowconfigure(0, weight=1)
+    area.grid_columnconfigure(0, weight=1)
+    canvas = tk.Canvas(area, highlightthickness=0)
+    canvas.grid(row=0, column=0, sticky='nsew')
+    vertical = ttk.Scrollbar(area, orient='vertical', command=canvas.yview)
+    vertical.grid(row=0, column=1, sticky='ns')
+    horizontal = ttk.Scrollbar(area, orient='horizontal', command=canvas.xview)
+    horizontal.grid(row=1, column=0, sticky='ew')
+    canvas.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+    formulario = ttk.Frame(canvas)
+    item = canvas.create_window(0, 0, window=formulario, anchor='nw')
+
+    def ajustar(_event=None):
+        canvas.itemconfigure(item, width=max(canvas.winfo_width(), formulario.winfo_reqwidth()),
+                             height=max(canvas.winfo_height(), formulario.winfo_reqheight()))
+        canvas.configure(scrollregion=canvas.bbox('all'))
+
+    formulario.bind('<Configure>', ajustar)
+    canvas.bind('<Configure>', ajustar)
+
+    def rolar(event):
+        # Text fields and lists keep their own scrolling behavior.
+        if event.widget.winfo_class() in ('Text', 'Treeview', 'TCombobox', 'Listbox'):
+            return
+        if event.widget.winfo_toplevel() == janela:
+            canvas.yview_scroll(-int(event.delta / 120), 'units')
+
+    janela.bind('<MouseWheel>', rolar, add='+')
+    return formulario, acoes
 
 
 # Tkinter capturador de dados
@@ -3872,7 +3979,7 @@ def obter_matricula():
     root.title("Entrada de Dados")
     maximizar_janela_tk(root)
 
-    root.minsize(1100, 720)
+    root.minsize(900, 500)
     root.withdraw()
 
     dados = {}
@@ -3885,6 +3992,7 @@ def obter_matricula():
     bloqueio_auto = {"ativo": False}
     arquivos_scan_paths: List[str] = []
     arquivos_documento_paths: List[str] = []
+    estado_boletim = {"matricula": "", "resultado": None, "arquivos": [], "recortes": {}}
     recortes_historico_por_arquivo: Dict[str, Tuple[int, int, int, int]] = {}
     recortes_documento_por_arquivo: Dict[str, Tuple[int, int, int, int]] = {}
 
@@ -3895,6 +4003,23 @@ def obter_matricula():
     uf_var = tk.StringVar(value=UF_ESCOLA_PADRAO)
     serie_var = tk.StringVar()
     carga_horaria_var = tk.StringVar()
+
+    def definir_carga_horaria_interface(valor):
+        texto = str(valor if valor is not None else '').strip()
+        try:
+            normalizado = FuncoesDoPrograma.normalizar_carga_horaria(texto) if texto else ''
+        except ValueError:
+            carga_horaria_var.set('')
+            status_scan_var.set(f'Carga horária inválida: {texto}. Informe novamente.')
+            return False
+        carga_horaria_var.set(normalizado)
+        if texto != normalizado:
+            print(f'Carga horária convertida para o GEMUL: {texto} -> {normalizado} horas.')
+        return True
+
+    def normalizar_campo_carga_horaria(event=None):
+        return definir_carga_horaria_interface(carga_horaria_var.get())
+
     data_matricula_var = tk.StringVar()
     data_transferencia_var = tk.StringVar()
     ja_estudou_var = tk.BooleanVar()
@@ -3907,6 +4032,8 @@ def obter_matricula():
     nome_aluno_var = tk.StringVar()
     arquivo_scan_var = tk.StringVar()
     arquivo_documento_var = tk.StringVar()
+    arquivo_boletim_var = tk.StringVar()
+    status_boletim_var = tk.StringVar(value="Nenhum boletim bimestral lido.")
     status_scan_var = tk.StringVar(value="Nenhum arquivo processado pela IA.")
     status_documento_var = tk.StringVar(value="Nenhum documento civil processado.")
     ocr_timer_var = tk.StringVar(value="OCR parado: 00:00.0")
@@ -3963,7 +4090,7 @@ def obter_matricula():
         return corrigir_texto_utf8(txt_observacoes_widget.get("1.0", "end-1c")).strip()
 
     def definir_texto_observacoes(texto: Any):
-        valor = corrigir_texto_utf8(texto)
+        valor = disciplinas_historico.normalizar_observacao_conceitos(corrigir_texto_utf8(texto))
         txt_observacoes_var.set(valor)
         if txt_observacoes_widget is not None:
             txt_observacoes_widget.delete("1.0", tk.END)
@@ -4025,6 +4152,7 @@ def obter_matricula():
         on_transfer_date_change()
 
     def coletar_dados_formulario() -> Dict[str, Any]:
+        aplicar_escola_serie_ano_corrente()
         dados_formulario: Dict[str, Any] = {}
         dados_formulario["numero_matricula"] = numero_matricula_var.get()
         dados_formulario["nome_aluno"] = nome_aluno_var.get()
@@ -4107,6 +4235,10 @@ def obter_matricula():
         if lancamento_em_andamento["ativo"]:
             return
 
+        if not normalizar_campo_carga_horaria() or not carga_horaria_var.get():
+            messagebox.showwarning('Carga horária', 'Informe uma carga horária válida antes de lançar.', parent=root)
+            return
+
         dados_formulario = coletar_dados_formulario()
         numero_matricula = re.sub(r"\D", "", str(dados_formulario.get("numero_matricula", "") or ""))
         if len(numero_matricula) != 9:
@@ -4171,6 +4303,8 @@ def obter_matricula():
             )
         else:
             status_scan_var.set(mensagem)
+            if dados_formulario.get("aviso_observacoes"):
+                messagebox.showwarning("Notas gravadas; observacoes pendentes", dados_formulario["aviso_observacoes"], parent=root)
             if dados_formulario.get("resumo_disciplinas_extra"):
                 messagebox.showinfo("Disciplinas extras", dados_formulario["resumo_disciplinas_extra"], parent=root)
             if mensagem.startswith('Registro já existente:'):
@@ -4206,10 +4340,67 @@ def obter_matricula():
             return
         on_transfer_date_change()
 
+    def aplicar_escola_serie_ano_corrente():
+        if bloqueio_auto["ativo"] or extrair_ano_4_digitos(ano_var.get()) != str(datetime.now().year):
+            return
+        bloqueio_auto["ativo"] = True
+        try:
+            if nome_escola_var.get() != ESCOLA_PADRAO:
+                nome_escola_var.set(ESCOLA_PADRAO)
+            aplicar_dados_escola_padrao()
+            matricula = re.sub(r"\D", "", numero_matricula_var.get())
+            if not matricula:
+                if serie_var.get():
+                    serie_var.set("")
+                return
+            try:
+                registros = carregar_base_rel_aluno()
+            except (OSError, ValueError) as exc:
+                if serie_var.get():
+                    serie_var.set("")
+                status_scan_var.set(f"Não foi possível consultar a série no cadastro: {exc}")
+                return
+            ano = str(datetime.now().year)
+            series_cadastro = set()
+            for registro in registros:
+                if registro.get("matricula") != matricula:
+                    continue
+                entrada = registro.get("data_matricula", "")
+                saida = registro.get("data_afastamento", "")
+                if validar_data(entrada) and entrada[-4:] > ano:
+                    continue
+                if validar_data(saida) and saida[-4:] < ano:
+                    continue
+                serie = normalizar_serie(registro.get("turma", ""))
+                if serie:
+                    series_cadastro.add(serie)
+            serie_atual = next(iter(series_cadastro)) if len(series_cadastro) == 1 else ""
+            if serie_var.get() != serie_atual:
+                serie_var.set(serie_atual)
+            if len(series_cadastro) != 1:
+                status_scan_var.set("Série do ano corrente não encontrada ou ambígua no cadastro da matrícula.")
+        finally:
+            bloqueio_auto["ativo"] = False
+            on_transfer_date_change()
+
+    atualizacao_ano_corrente = {"pendente": None}
+
+    def agendar_escola_serie_ano_corrente(*_args):
+        # Executa após preenchimentos em lote, inclusive cache e extração por IA.
+        if atualizacao_ano_corrente["pendente"] is not None:
+            root.after_cancel(atualizacao_ano_corrente["pendente"])
+
+        def atualizar():
+            atualizacao_ano_corrente["pendente"] = None
+            aplicar_escola_serie_ano_corrente()
+
+        atualizacao_ano_corrente["pendente"] = root.after_idle(atualizar)
+
     def on_ano_change(*_args):
         if bloqueio_auto["ativo"]:
             return
         ano = extrair_ano_4_digitos(ano_var.get())
+        aplicar_escola_serie_ano_corrente()
         if ano and (ano == str(datetime.now().year) or ano not in historicos_por_ano):
             bloqueio_auto["ativo"] = True
             try:
@@ -4220,7 +4411,8 @@ def obter_matricula():
                 observacoes_var.set(False)
                 marcar_disciplinas_var.set(False)
                 ficha_descritiva_var.set(False)
-                cursando_var.set(ano == str(datetime.now().year))
+                cursando_var.set(ano == str(datetime.now().year)
+                                 and not validar_data(data_transferencia_var.get().strip()))
                 dados["ano_sem_historico"] = ano
                 dados["disciplinas_extra"] = []
                 dados.pop("resumo_disciplinas_extra", None)
@@ -4839,7 +5031,7 @@ def obter_matricula():
             uf_var.set(str(dados_cache.get("uf", "") or "").strip())
             aplicar_dados_escola_padrao()
             serie_var.set(str(dados_cache.get("serie", "") or "").strip())
-            carga_horaria_var.set(str(dados_cache.get("carga_horaria", "") or "").strip())
+            definir_carga_horaria_interface(dados_cache.get("carga_horaria", ""))
             data_matricula_var.set(str(dados_cache.get("data_matricula", "") or "").strip())
             data_transferencia_var.set(str(dados_cache.get("data_transferencia", "") or "").strip())
 
@@ -5253,7 +5445,7 @@ def obter_matricula():
             serie_var.set(serie_ia or registro.get("serie", ""))
 
             if registro.get("carga_horaria"):
-                carga_horaria_var.set(registro["carga_horaria"])
+                definir_carga_horaria_interface(registro["carga_horaria"])
             else:
                 carga_horaria_var.set(calcular_carga_horaria())
 
@@ -5383,14 +5575,9 @@ def obter_matricula():
                 matricula_preferencial=numero_matricula_var.get(),
             )
             possui_registro = comparacao.get("registro") is not None
-            score = max(0.0, float(comparacao.get("score") or 0.0))
+            score = min(1.0, max(0.0, float(comparacao.get("score") or 0.0)))
             classificacao = classificar_confianca_documento(score, possui_registro)
-            resumo_final = (
-                f"Documento analisado com sucesso. "
-                f"Resultado da validacao: {classificacao} ({score:.0%}). "
-                f"{comparacao['resumo']} "
-                f"{resumo_extracao}"
-            ).strip()
+            resumo_final = comparacao['resumo']
             status_documento_var.set(
                 f"Documento analisado com sucesso. {classificacao.capitalize()} ({score:.0%})."
             )
@@ -5524,6 +5711,256 @@ def obter_matricula():
 
         threading.Thread(target=worker_ia, daemon=True).start()
 
+    def restaurar_boletim_da_matricula(*_args):
+        matricula = re.sub(r'\D', '', numero_matricula_var.get())
+        if matricula == estado_boletim['matricula']:
+            return
+        estado_boletim.update(matricula=matricula, resultado=None, arquivos=[], recortes={})
+        arquivo_boletim_var.set('')
+        status_boletim_var.set('Nenhum boletim salvo para esta matrícula.')
+        if len(matricula) != 9:
+            return
+        try:
+            payload = boletim_bimestral.carregar(os.path.dirname(os.path.abspath(__file__)), matricula)
+            if payload:
+                estado_boletim['resultado'] = payload['boletins'][payload['ultimo_ano']]
+                estado_boletim['arquivos'] = payload.get('arquivos', [])
+                arquivo_boletim_var.set(' | '.join(estado_boletim['arquivos']))
+                status_boletim_var.set('Boletim salvo recuperado. Use “Revisar boletim”.')
+        except (OSError, ValueError, KeyError) as exc:
+            status_boletim_var.set(f'Falha ao recuperar boletim: {exc}')
+
+    def selecionar_boletim():
+        if ocr_estado['ativo']:
+            return
+        caminhos = filedialog.askopenfilenames(parent=root, title='Selecione somente o boletim bimestral',
+            initialdir=AUTO_HISTORICO_DIR if os.path.isdir(AUTO_HISTORICO_DIR) else os.path.dirname(__file__),
+            filetypes=[('Arquivos suportados', '*.png *.jpg *.jpeg *.webp *.tif *.tiff *.pdf *.txt')])
+        if not caminhos:
+            return
+        recortes = coletar_recortes_ocr(root, list(caminhos), 'Área de leitura do boletim')
+        if recortes is OCR_SELECTOR_CANCELLED:
+            return
+        estado_boletim.update(arquivos=list(caminhos), recortes=recortes, resultado=None)
+        arquivo_boletim_var.set(' | '.join(caminhos))
+        status_boletim_var.set('Boletim selecionado para leitura.')
+
+    def revisar_boletim():
+        resultado = estado_boletim.get('resultado')
+        matricula = re.sub(r'\D', '', numero_matricula_var.get())
+        if not resultado or resultado['numero_matricula'] != matricula:
+            messagebox.showinfo('Boletim', 'Leia um boletim para esta matrícula primeiro.', parent=root)
+            return
+        try:
+            resultado = boletim_bimestral.validar(resultado, matricula)
+            estado_boletim['resultado'] = resultado
+        except ValueError as exc:
+            messagebox.showwarning('Boletim', str(exc), parent=root)
+            return
+        janela = tk.Toplevel(root)
+        janela.title(f'Boletim bimestral — {matricula} — revisar notas')
+        janela.geometry('850x580')
+        janela.minsize(800, 500)
+        cabecalho = ttk.Frame(janela, padding=10)
+        cabecalho.pack(fill='x')
+        ttk.Label(cabecalho, text=f"Aluno: {resultado['nome_aluno']} | Matrícula: {matricula}").pack(anchor='w')
+        if resultado.get('numero_matricula_origem'):
+            ttk.Label(cabecalho, text=f"Matrícula na escola de origem: {resultado['numero_matricula_origem']}").pack(anchor='w')
+        ano_boletim = tk.StringVar(value=resultado['ano'])
+        try:
+            turma_cadastro = boletim_bimestral.turma_do_cadastro(carregar_base_rel_aluno(), matricula, resultado['turma'])
+        except (ValueError, OSError) as exc:
+            turma_cadastro = ''
+            status_boletim_var.set(f'Confira a turma do aluno: {exc}')
+        turma_boletim = tk.StringVar(value=turma_cadastro)
+        ttk.Label(cabecalho, text=f'Ano do boletim (lançamento permitido somente em {datetime.now().year})').pack(anchor='w')
+        ttk.Entry(cabecalho, textvariable=ano_boletim, state='readonly').pack(fill='x')
+        ttk.Label(cabecalho, text='Turma do aluno no GEMUL (recuperada do cadastro)').pack(anchor='w')
+        ttk.Entry(cabecalho, textvariable=turma_boletim).pack(fill='x')
+        tabela_frame = ttk.Frame(janela)
+        tabela_frame.pack(fill='both', expand=True, padx=10)
+        tabela = ttk.Treeview(tabela_frame, columns=('disciplina', 'b1', 'b2', 'b3', 'b4'), show='headings', height=9, selectmode='browse')
+        for coluna, titulo in [('disciplina', 'Disciplina'), ('b1', '1º bimestre'),
+                               ('b2', '2º bimestre'), ('b3', '3º bimestre'), ('b4', '4º bimestre')]:
+            tabela.heading(coluna, text=titulo)
+        tabela.column('disciplina', width=350, minwidth=250)
+        for coluna in ('b1', 'b2', 'b3', 'b4'):
+            tabela.column(coluna, width=105, minwidth=80, anchor='center')
+        scroll = ttk.Scrollbar(tabela_frame, orient='vertical', command=tabela.yview)
+        tabela.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        tabela.pack(fill='both', expand=True)
+        for linha in boletim_bimestral.linhas_conferencia(resultado['notas']):
+            tabela.insert('', 'end', values=linha)
+        editor = ttk.Frame(janela, padding=10)
+        editor.pack(fill='x')
+        disciplina_edit = tk.StringVar()
+        bimestre_edit = tk.StringVar(value='1')
+        nota_edit = tk.StringVar()
+        ttk.Entry(editor, textvariable=disciplina_edit, width=40, state='readonly').pack(side='left', fill='x', expand=True)
+        ttk.Label(editor, text='Bimestre:').pack(side='left', padx=(8, 0))
+        seletor_bimestre = ttk.Combobox(editor, textvariable=bimestre_edit, values=['1', '2', '3', '4'], state='readonly', width=5)
+        seletor_bimestre.pack(side='left', padx=5)
+        ttk.Label(editor, text='Nota:').pack(side='left')
+        ttk.Entry(editor, textvariable=nota_edit, width=8).pack(side='left')
+
+        def selecionar_linha(_event=None):
+            if tabela.selection():
+                valores = tabela.item(tabela.selection()[0], 'values')
+                disciplina_edit.set(valores[0])
+                nota_edit.set(valores[int(bimestre_edit.get())])
+        tabela.bind('<<TreeviewSelect>>', selecionar_linha)
+        seletor_bimestre.bind('<<ComboboxSelected>>', selecionar_linha)
+
+        def selecionar_celula(event):
+            linha = tabela.identify_row(event.y)
+            coluna = tabela.identify_column(event.x)
+            if linha and coluna in ('#2', '#3', '#4', '#5'):
+                tabela.selection_set(linha)
+                bimestre_edit.set(str(int(coluna[1:]) - 1))
+                selecionar_linha()
+        tabela.bind('<ButtonRelease-1>', selecionar_celula)
+
+        def aplicar_correcao():
+            if tabela.selection():
+                selecionada = tabela.selection()[0]
+                valores = list(tabela.item(selecionada, 'values'))
+                valores[int(bimestre_edit.get())] = nota_edit.get().strip()
+                tabela.item(selecionada, values=valores)
+        ttk.Button(editor, text='Aplicar correção', command=aplicar_correcao).pack(side='left', padx=5)
+
+        def salvar_revisao():
+            if re.sub(r'\D', '', numero_matricula_var.get()) != matricula:
+                raise ValueError('A matrícula selecionada mudou. Reabra a revisão do boletim.')
+            novo = dict(resultado, ano=ano_boletim.get(), turma=turma_boletim.get(),
+                        notas=boletim_bimestral.notas_da_conferencia(
+                            [tabela.item(i, 'values') for i in tabela.get_children()]))
+            validado = boletim_bimestral.salvar(os.path.dirname(os.path.abspath(__file__)), matricula,
+                                               novo, estado_boletim['arquivos'])
+            estado_boletim['resultado'] = validado
+            status_boletim_var.set(f"Boletim {validado['ano']} salvo por matrícula: {len(validado['notas'])} notas.")
+            return validado
+
+        def salvar_local():
+            try:
+                salvar_revisao()
+            except (ValueError, OSError) as exc:
+                messagebox.showerror('Boletim', str(exc), parent=janela)
+
+        def abrir_no_gemul():
+            try:
+                validado = salvar_revisao()
+                if not tabela.selection():
+                    raise ValueError('Selecione uma disciplina da tabela para abrir no GEMUL.')
+                disciplina = tabela.item(tabela.selection()[0], 'values')[0]
+                pagina = _get_base(garantir_sessao_gemul(matricula))
+                mensagem = boletim_bimestral.preparar_tela(pagina, GEMUL_BASE_URL, validado,
+                                                          turma_boletim.get(), disciplina)
+                messagebox.showinfo('Preparar notas bimestrais', mensagem, parent=janela)
+            except Exception as exc:
+                messagebox.showwarning('Preparar notas bimestrais', str(exc), parent=janela)
+
+        def lancar_boletim_no_gemul():
+            if lancamento_em_andamento['ativo'] or ocr_estado['ativo']:
+                return
+            try:
+                validado = salvar_revisao()
+                boletim_bimestral.exigir_ano_corrente(validado)
+                # The destination class comes from this student's register, not the source school's report card.
+                turma_destino = boletim_bimestral.turma_do_cadastro(carregar_base_rel_aluno(), matricula,
+                                                                  turma_boletim.get())
+                turma_boletim.set(turma_destino)
+                lancamento_em_andamento['ativo'] = True
+                botao_lancar_boletim.state(['disabled'])
+                janela.configure(cursor='watch')
+                janela.update_idletasks()
+
+                def atualizar_progresso(mensagem):
+                    status_boletim_var.set(mensagem)
+                    progresso_boletim_var.set(mensagem)
+                    janela.update_idletasks()
+
+                pagina = _get_base(garantir_sessao_gemul(matricula))
+                retorno = boletim_bimestral.lancar(pagina, GEMUL_BASE_URL, validado, turma_destino,
+                                                   progresso=atualizar_progresso)
+                status_boletim_var.set(retorno['mensagem'])
+                progresso_boletim_var.set(retorno['mensagem'])
+                messagebox.showinfo('Notas bimestrais gravadas' if retorno['notas'] else 'Boletim sem disciplinas disponíveis',
+                                    retorno['mensagem'], parent=janela)
+            except Exception as exc:
+                status_boletim_var.set(f'Lançamento bimestral interrompido: {exc}')
+                progresso_boletim_var.set(str(exc))
+                messagebox.showwarning('Conferência das notas bimestrais', str(exc), parent=janela)
+            finally:
+                lancamento_em_andamento['ativo'] = False
+                botao_lancar_boletim.state(['!disabled'])
+                janela.configure(cursor='')
+        acoes = ttk.Frame(janela, padding=10)
+        acoes.pack(fill='x')
+        ttk.Button(acoes, text='Salvar revisão', command=salvar_local).pack(side='left')
+        ttk.Button(acoes, text='Abrir disciplina no GEMUL', command=abrir_no_gemul).pack(side='right')
+        botao_lancar_boletim = ttk.Button(acoes, text='Lançar notas do boletim', command=lancar_boletim_no_gemul)
+        botao_lancar_boletim.pack(side='right', padx=8)
+        progresso_boletim_var = tk.StringVar(value='Clique em uma nota para corrigir. Células vazias não serão lançadas; zero é uma nota válida.')
+        ttk.Label(janela, textvariable=progresso_boletim_var, wraplength=800).pack(padx=10, pady=5)
+
+    def ler_boletim_com_ia():
+        if ocr_estado['ativo']:
+            return
+        matricula = re.sub(r'\D', '', numero_matricula_var.get())
+        if len(matricula) != 9:
+            messagebox.showwarning('Boletim', 'Informe a matrícula com nove dígitos primeiro.', parent=root)
+            return
+        if not estado_boletim['arquivos']:
+            selecionar_boletim()
+        caminhos = list(estado_boletim['arquivos'])
+        if not caminhos:
+            return
+        if estado_boletim.get('resultado'):
+            revisar_boletim()
+            return
+        try:
+            processados, temporarios = preparar_caminhos_para_ocr(caminhos, estado_boletim['recortes'])
+        except Exception as exc:
+            messagebox.showerror('Boletim', str(exc), parent=root)
+            return
+        ocr_estado.update(ativo=True, inicio=time.time(), frame=0)
+        if progresso_ocr is not None:
+            progresso_ocr.start(12)
+        status_boletim_var.set('Lendo boletim bimestral com IA...')
+        atualizar_indicador_ocr()
+        nome_leitura = nome_aluno_var.get().strip()
+
+        def worker():
+            resultado_lido, erro = None, None
+            try:
+                resultado_lido = extrair_campos_boletim_com_openai(processados)
+                resultado_lido = boletim_bimestral.salvar(os.path.dirname(os.path.abspath(__file__)),
+                                                         matricula, resultado_lido, caminhos, nome_leitura)
+            except Exception as exc:
+                erro = str(exc)
+            finally:
+                for caminho in temporarios:
+                    try:
+                        os.remove(caminho)
+                    except OSError:
+                        pass
+
+            def concluir():
+                finalizar_indicador_ocr('OCR do boletim concluído' if not erro else 'OCR do boletim com falha')
+                if erro:
+                    status_boletim_var.set(f'Falha na leitura do boletim: {erro}')
+                    messagebox.showerror('Leitura do boletim', erro, parent=root)
+                    return
+                if re.sub(r'\D', '', numero_matricula_var.get()) != matricula:
+                    return
+                estado_boletim.update(resultado=resultado_lido, arquivos=caminhos)
+                arquivo_boletim_var.set(' | '.join(caminhos))
+                status_boletim_var.set(f"Boletim {resultado_lido['ano']} salvo. Revise as notas bimestrais.")
+                revisar_boletim()
+            root.after(0, concluir)
+        threading.Thread(target=worker, daemon=True).start()
+
     def carregar_documento_com_ia():
         if ocr_estado["ativo"]:
             return
@@ -5592,78 +6029,93 @@ def obter_matricula():
 
         threading.Thread(target=worker_documento, daemon=True).start()
 
-    root.grid_columnconfigure(1, weight=1)
-    root.grid_columnconfigure(3, weight=1)
-    root.grid_columnconfigure(4, weight=1)
-    root.grid_columnconfigure(5, weight=1)
-    root.grid_rowconfigure(8, weight=1)
+    formulario, barra_acoes = criar_area_formulario(root)
+    formulario.grid_columnconfigure(1, weight=1)
+    formulario.grid_columnconfigure(3, weight=1)
+    formulario.grid_columnconfigure(4, weight=1)
+    formulario.grid_columnconfigure(5, weight=1)
+    formulario.grid_rowconfigure(8, weight=1)
 
-    ttk.Label(root, text="Número da Matrícula:").grid(row=0, column=0, padx=10, pady=5)
-    frame_matricula = ttk.Frame(root)
+    ttk.Label(formulario, text="Número da Matrícula:").grid(row=0, column=0, padx=10, pady=5)
+    frame_matricula = ttk.Frame(formulario)
     frame_matricula.grid(row=0, column=1, padx=10, pady=5, sticky="we")
     frame_matricula.grid_columnconfigure(0, weight=1)
     entrada_matricula = ttk.Entry(frame_matricula, textvariable=numero_matricula_var)
     entrada_matricula.grid(row=0, column=0, sticky="we")
     ttk.Button(frame_matricula, text="Buscar", command=consultar_matricula_digitada).grid(row=0, column=1, padx=(6, 0))
-    ttk.Label(root, text="Nome do Aluno (IA):").grid(row=0, column=2, padx=10, pady=5, sticky="e")
-    ttk.Entry(root, textvariable=nome_aluno_var, width=45).grid(row=0, column=3, padx=10, pady=5, columnspan=3, sticky="we")
+    ttk.Label(formulario, text="Nome do Aluno (IA):").grid(row=0, column=2, padx=10, pady=5, sticky="e")
+    ttk.Entry(formulario, textvariable=nome_aluno_var, width=45).grid(row=0, column=3, padx=10, pady=5, columnspan=3, sticky="we")
 
-    ttk.Label(root, text="Ano:").grid(row=1, column=0, padx=10, pady=5)
-    ano_combobox = ttk.Combobox(root, textvariable=ano_var, values=[str(datetime.now().year)])
+    ttk.Label(formulario, text="Ano:").grid(row=1, column=0, padx=10, pady=5)
+    ano_combobox = ttk.Combobox(formulario, textvariable=ano_var, values=[str(datetime.now().year)])
     ano_combobox.grid(row=1, column=1, padx=10, pady=5, sticky="we")
-    ttk.Label(root, text="Arquivo(s) do Historico:").grid(row=1, column=2, padx=10, pady=5, sticky="e")
-    ttk.Entry(root, textvariable=arquivo_scan_var, width=45).grid(row=1, column=3, padx=10, pady=5, sticky="we")
-    ttk.Button(root, text="Arquivos...", command=selecionar_arquivo_scan).grid(row=1, column=4, padx=5, pady=5)
-    botao_ler_ia = ttk.Button(root, text="Ler com IA", command=carregar_dados_com_ia)
+    ttk.Label(formulario, text="Arquivo(s) do Historico:").grid(row=1, column=2, padx=10, pady=5, sticky="e")
+    frame_arquivo_historico = ttk.Frame(formulario)
+    frame_arquivo_historico.grid(row=1, column=3, padx=10, pady=5, sticky="we")
+    ttk.Entry(frame_arquivo_historico, textvariable=arquivo_scan_var, width=45).pack(fill='x')
+    tk.Label(frame_arquivo_historico, textvariable=status_scan_var, anchor='w',
+             justify='left', wraplength=420).pack(fill='x')
+    ttk.Button(formulario, text="Arquivos...", command=selecionar_arquivo_scan).grid(row=1, column=4, padx=5, pady=5)
+    botao_ler_ia = ttk.Button(formulario, text="Ler com IA", command=carregar_dados_com_ia)
     botao_ler_ia.grid(row=1, column=5, padx=5, pady=5)
-    tk.Label(root, textvariable=status_scan_var, anchor="w", justify="left", wraplength=520).grid(
-        row=2, column=3, columnspan=3, padx=10, pady=2, sticky="w"
-    )
+    ttk.Label(formulario, text='Arquivo(s) do Boletim:').grid(row=2, column=2, padx=10, pady=5, sticky='e')
+    frame_arquivo_boletim = ttk.Frame(formulario)
+    frame_arquivo_boletim.grid(row=2, column=3, padx=10, pady=5, sticky='we')
+    ttk.Entry(frame_arquivo_boletim, textvariable=arquivo_boletim_var, state='readonly', width=45).pack(fill='x')
+    tk.Label(frame_arquivo_boletim, textvariable=status_boletim_var, anchor='w',
+             justify='left', wraplength=420).pack(fill='x')
+    ttk.Button(formulario, text='Boletim...', command=selecionar_boletim).grid(row=2, column=4, padx=5, pady=5)
+    botoes_boletim = ttk.Frame(formulario)
+    botoes_boletim.grid(row=2, column=5, padx=5, pady=5)
+    ttk.Button(botoes_boletim, text='Ler boletim com IA', command=ler_boletim_com_ia).pack(fill='x')
+    ttk.Button(botoes_boletim, text='Revisar boletim', command=revisar_boletim).pack(fill='x')
 
-    ttk.Label(root, text="Arquivo(s) do Documento:").grid(row=3, column=2, padx=10, pady=5, sticky="e")
-    ttk.Entry(root, textvariable=arquivo_documento_var, width=45).grid(row=3, column=3, padx=10, pady=5, sticky="we")
-    ttk.Button(root, text="Documento...", command=selecionar_arquivo_documento).grid(row=3, column=4, padx=5, pady=5)
-    botao_ler_documento = ttk.Button(root, text="Ler Documento", command=carregar_documento_com_ia)
+    ttk.Label(formulario, text="Arquivo(s) do Documento:").grid(row=3, column=2, padx=10, pady=5, sticky="e")
+    ttk.Entry(formulario, textvariable=arquivo_documento_var, width=45).grid(row=3, column=3, padx=10, pady=5, sticky="we")
+    ttk.Button(formulario, text="Documento...", command=selecionar_arquivo_documento).grid(row=3, column=4, padx=5, pady=5)
+    botao_ler_documento = ttk.Button(formulario, text="Ler Documento", command=carregar_documento_com_ia)
     botao_ler_documento.grid(row=3, column=5, padx=5, pady=5)
 
-    ttk.Label(root, text="Nome da Escola:").grid(row=3, column=0, padx=10, pady=5)
-    escola_combobox = ttk.Combobox(root, textvariable=nome_escola_var, values=ESCOLAS_SUGERIDAS)
+    ttk.Label(formulario, text="Nome da Escola:").grid(row=3, column=0, padx=10, pady=5)
+    escola_combobox = ttk.Combobox(formulario, textvariable=nome_escola_var, values=ESCOLAS_SUGERIDAS)
     escola_combobox.grid(row=3, column=1, padx=10, pady=5, sticky="we")
 
-    tk.Label(root, textvariable=status_documento_var, anchor="w", justify="left", wraplength=360).grid(
+    tk.Label(formulario, textvariable=status_documento_var, anchor="w", justify="left", wraplength=360).grid(
         row=4, column=4, columnspan=2, padx=10, pady=2, sticky="w"
     )
 
-    ttk.Label(root, text="Cidade:").grid(row=4, column=0, padx=10, pady=5)
-    ttk.Entry(root, textvariable=cidade_var).grid(row=4, column=1, padx=10, pady=5, sticky="we")
-    ttk.Label(root, text="UF:").grid(row=4, column=2, padx=10, pady=5)
-    ttk.Entry(root, textvariable=uf_var).grid(row=4, column=3, padx=10, pady=5, sticky="we")
+    ttk.Label(formulario, text="Cidade:").grid(row=4, column=0, padx=10, pady=5)
+    ttk.Entry(formulario, textvariable=cidade_var).grid(row=4, column=1, padx=10, pady=5, sticky="we")
+    ttk.Label(formulario, text="UF:").grid(row=4, column=2, padx=10, pady=5)
+    ttk.Entry(formulario, textvariable=uf_var).grid(row=4, column=3, padx=10, pady=5, sticky="we")
 
-    tk.Checkbutton(root, text="Cursando", variable=cursando_var).grid(row=5, column=2, padx=10, pady=5, sticky="w")
-    tk.Checkbutton(root, text="Ficha Descritiva", variable=ficha_descritiva_var).grid(row=5, column=3, padx=10, pady=5)
-    tk.Checkbutton(root, text="Já estudou aqui", variable=ja_estudou_var).grid(row=5, column=4, padx=10, pady=5, sticky="w")
-    tk.Checkbutton(root, text="Deve histórico", variable=deve_historico_var, command=salvar_deve_historico_atual).grid(
+    tk.Checkbutton(formulario, text="Cursando", variable=cursando_var).grid(row=5, column=2, padx=10, pady=5, sticky="w")
+    tk.Checkbutton(formulario, text="Ficha Descritiva", variable=ficha_descritiva_var).grid(row=5, column=3, padx=10, pady=5)
+    tk.Checkbutton(formulario, text="Já estudou aqui", variable=ja_estudou_var).grid(row=5, column=4, padx=10, pady=5, sticky="w")
+    tk.Checkbutton(formulario, text="Deve histórico", variable=deve_historico_var, command=salvar_deve_historico_atual).grid(
         row=5, column=5, padx=10, pady=5, sticky="w"
     )
 
-    ttk.Label(root, text="Série:").grid(row=5, column=0, padx=10, pady=5)
-    serie_combobox = ttk.Combobox(root, textvariable=serie_var)
+    ttk.Label(formulario, text="Série:").grid(row=5, column=0, padx=10, pady=5)
+    serie_combobox = ttk.Combobox(formulario, textvariable=serie_var)
     serie_combobox["values"] = series
     serie_combobox.grid(row=5, column=1, padx=10, pady=5, sticky="we")
     serie_combobox.bind("<KeyRelease>", autocomplete)
 
-    ttk.Label(root, text="Carga Horária:").grid(row=6, column=0, padx=10, pady=5)
-    ttk.Entry(root, textvariable=carga_horaria_var).grid(row=6, column=1, padx=10, pady=5, sticky="we")
-    ttk.Label(root, text="Data de Transferência:").grid(row=6, column=2, padx=10, pady=5)
-    ttk.Entry(root, textvariable=data_transferencia_var).grid(row=6, column=3, padx=10, pady=5, sticky="we")
-    ttk.Label(root, textvariable=ocr_timer_var).grid(row=6, column=4, columnspan=2, padx=10, pady=2, sticky="w")
+    ttk.Label(formulario, text="Carga Horária:").grid(row=6, column=0, padx=10, pady=5)
+    campo_carga_horaria = ttk.Entry(formulario, textvariable=carga_horaria_var)
+    campo_carga_horaria.grid(row=6, column=1, padx=10, pady=5, sticky="we")
+    campo_carga_horaria.bind('<FocusOut>', normalizar_campo_carga_horaria)
+    ttk.Label(formulario, text="Data de Transferência:").grid(row=6, column=2, padx=10, pady=5)
+    ttk.Entry(formulario, textvariable=data_transferencia_var).grid(row=6, column=3, padx=10, pady=5, sticky="we")
+    ttk.Label(formulario, textvariable=ocr_timer_var).grid(row=6, column=4, columnspan=2, padx=10, pady=2, sticky="w")
 
-    tk.Checkbutton(root, text="Observações", variable=observacoes_var).grid(row=7, column=0, padx=10, pady=5, sticky="w")
-    ttk.Label(root, text="Texto de Observações:").grid(row=7, column=2, padx=10, pady=5, sticky="w")
-    progresso_ocr = ttk.Progressbar(root, mode="indeterminate", length=240)
+    tk.Checkbutton(formulario, text="Observações", variable=observacoes_var).grid(row=7, column=0, padx=10, pady=5, sticky="w")
+    ttk.Label(formulario, text="Texto de Observações:").grid(row=7, column=2, padx=10, pady=5, sticky="w")
+    progresso_ocr = ttk.Progressbar(formulario, mode="indeterminate", length=240)
     progresso_ocr.grid(row=7, column=4, columnspan=2, padx=10, pady=2, sticky="we")
 
-    obs_frame = ttk.Frame(root)
+    obs_frame = ttk.Frame(formulario)
     obs_frame.grid(row=8, column=2, columnspan=4, rowspan=12, padx=10, pady=5, sticky="nsew")
     obs_frame.grid_columnconfigure(0, weight=1)
     obs_frame.grid_rowconfigure(0, weight=1)
@@ -5685,20 +6137,20 @@ def obter_matricula():
     obs_frame.grid_rowconfigure(1, weight=1)
     obs_frame.grid_rowconfigure(3, weight=1)
 
-    tk.Checkbutton(root, text="Marcar Disciplinas", variable=marcar_disciplinas_var, command=mostrar_disciplinas).grid(
+    tk.Checkbutton(formulario, text="Marcar Disciplinas", variable=marcar_disciplinas_var, command=mostrar_disciplinas).grid(
         row=8, column=0, padx=10, pady=5, sticky="w"
     )
 
     for indice, (disciplina, var) in enumerate(disciplinas_vars.items(), start=9):
-        label_widget = ttk.Label(root, text=disciplina + ":")
-        entry_widget = ttk.Entry(root, textvariable=var)
+        label_widget = ttk.Label(formulario, text=disciplina + ":")
+        entry_widget = ttk.Entry(formulario, textvariable=var)
         label_widget.grid(row=indice, column=0, padx=10, pady=5, sticky="e")
         entry_widget.grid(row=indice, column=1, padx=10, pady=5, sticky="we")
         label_widget.grid_remove()
         entry_widget.grid_remove()
         disciplina_widgets.append((label_widget, entry_widget))
 
-    area_cobranca = ttk.LabelFrame(root, text='Cobrança de histórico', padding=8)
+    area_cobranca = ttk.LabelFrame(formulario, text='Cobrança de histórico', padding=8)
     area_cobranca.grid(row=18, column=0, columnspan=2, padx=10, pady=5, sticky='we')
     ttk.Button(area_cobranca, text='Iniciar Protocolo de Cobrança de Histórico',
                command=abrir_cobranca_historico).pack(fill='x')
@@ -5745,13 +6197,15 @@ def obter_matricula():
         except Exception:
             monitoramento_navegador["ativo"] = False
 
-    botao_ok = ttk.Button(root, text="OK", command=submit)
-    botao_ok.grid(row=21, column=0, columnspan=2, pady=10)
-    ttk.Button(root, text="CANCELAR", command=encerrar_aplicacao).grid(row=21, column=2, columnspan=2, pady=10)
-    ttk.Button(root, text="RECUPERAR GEMUL", command=recuperar_gemul).grid(row=21, column=4, columnspan=2, pady=10)
-    ttk.Button(root, text="RESET", command=resetar_formulario).grid(row=22, column=0, columnspan=6, pady=(0, 10))
-    ttk.Button(root, text="ATUALIZAR ALUNOS", command=lambda: atualizar_base_alunos(forcar=True)).grid(
-        row=23, column=0, columnspan=6, pady=(0, 10))
+    for coluna in range(3):
+        barra_acoes.grid_columnconfigure(coluna, weight=1, uniform='acoes')
+    botao_ok = ttk.Button(barra_acoes, text="OK — Lançar histórico", command=submit)
+    botao_ok.grid(row=0, column=0, padx=4, pady=3, sticky='ew')
+    ttk.Button(barra_acoes, text="CANCELAR", command=encerrar_aplicacao).grid(row=0, column=1, padx=4, pady=3, sticky='ew')
+    ttk.Button(barra_acoes, text="RECUPERAR GEMUL", command=recuperar_gemul).grid(row=0, column=2, padx=4, pady=3, sticky='ew')
+    ttk.Button(barra_acoes, text="RESET", command=resetar_formulario).grid(row=1, column=0, padx=4, pady=3, sticky='ew')
+    ttk.Button(barra_acoes, text="ATUALIZAR ALUNOS", command=lambda: atualizar_base_alunos(forcar=True)).grid(
+        row=1, column=1, padx=4, pady=3, sticky='ew')
     def esquecer_credenciais_gemul():
         try:
             credenciais_locais.esquecer()
@@ -5759,11 +6213,11 @@ def obter_matricula():
             messagebox.showerror('Credenciais', f'Não foi possível apagar as credenciais salvas:\n{exc}', parent=root)
             return
         messagebox.showinfo('Credenciais', 'Credenciais esquecidas. No próximo acesso, informe o usuário e a senha.', parent=root)
-    ttk.Button(root, text='Esquecer credenciais GEMUL', command=esquecer_credenciais_gemul).grid(
-        row=24, column=0, columnspan=6, pady=(0, 8))
+    ttk.Button(barra_acoes, text='Esquecer credenciais GEMUL', command=esquecer_credenciais_gemul).grid(
+        row=1, column=2, padx=4, pady=3, sticky='ew')
     root.protocol("WM_DELETE_WINDOW", encerrar_aplicacao)
 
-    entrada_frame = ttk.Frame(root)
+    entrada_frame = ttk.Frame(formulario)
     entrada_frame.grid(row=7, column=1, padx=10, pady=5, sticky="we")
     ttk.Label(entrada_frame, text="Entrada:").pack(side="left")
     ttk.Entry(entrada_frame, textvariable=data_matricula_var, width=12).pack(side="left", fill="x", expand=True)
@@ -5773,10 +6227,14 @@ def obter_matricula():
     cidade_var.trace_add("write", on_cidade_change)
     serie_var.trace_add("write", on_serie_change)
     ano_var.trace_add("write", on_ano_change)
+    for var in (ano_var, numero_matricula_var, nome_escola_var, serie_var):
+        var.trace_add("write", agendar_escola_serie_ano_corrente)
     escola_combobox.bind("<<ComboboxSelected>>", on_escola_change)
     ano_combobox.bind("<<ComboboxSelected>>", on_ano_change)
     entrada_matricula.bind("<Return>", on_matricula_confirmada)
     entrada_matricula.bind("<FocusOut>", on_matricula_focus_out)
+    numero_matricula_var.trace_add('write', restaurar_boletim_da_matricula)
+    restaurar_boletim_da_matricula()
 
     aplicar_dados_escola_padrao()
     on_transfer_date_change()
@@ -6223,6 +6681,7 @@ def escrever_observacoes(driver, ano, nome_escola, cidade, ja_estudou, ficha_des
     observacoes_geradas = processamento.decisao_texto(ano, nome_escola, cidade, ja_estudou, ficha_descritiva, txt_observacoes, serie)
     observacoes_geradas = mesclar_textos_observacao(corrigir_texto_utf8(observacoes_geradas), txt_observacoes)
     observacoes_geradas = disciplinas_historico.limpar_observacao(observacoes_geradas)
+    observacoes_geradas = disciplinas_historico.normalizar_observacao_conceitos(observacoes_geradas)
     observacoes_geradas = mover_continuidade_estudos_para_final(observacoes_geradas)
     
     # Adiciona um print para verificar o texto gerado

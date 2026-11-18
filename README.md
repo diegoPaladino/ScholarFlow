@@ -10,6 +10,11 @@ ScholarFlow is a Windows desktop application for processing school records. It c
 - Normalize academic records and compare them with local student registers.
 - Assist with entering academic records through browser automation.
 - Cache document processing locally.
+- Read, review and enter bimonthly report cards in a separate input, keeping grades by student registration and year. In the report-card review window, use **Lançar notas do boletim** to submit all reviewed subjects for the current year. The destination class comes from the student's register; the workflow selects **Todas as Situações**, checks only the matching registration, and opens that student's grade form. Each subject is independently reopened after saving to verify persistence. Unspecified quarters, recovery and class-council entries are preserved. An interrupted run reports the subjects already confirmed and those still pending; repeating the run skips unchanged grades. Older report cards remain available for review but are not submitted as current-year grades.
+
+Civil-document comparison highlights only mismatches, including missing fields. Its weighted matching score is normalized to 0–100%; a city with an optional state suffix is accepted when the register contains only the city. Confirmed historical grades and pending observation edits are reported separately.
+
+Report cards may come from other school systems: the printed source registration is stored separately from the selected GEMUL registration. The student's name is still checked, and the browser workflow checks the destination registration before submitting. Only the standard GEMUL subjects are used for report cards; other subjects and subjects absent from the destination class are ignored without adding observations. Explicit aliases such as Arte → Artes are accepted, while Matemática Lúdica and Leitura e Fluência are not merged into standard subjects. Blank cells and dashes are omitted; numeric zero is retained. The AI reading instructions distinguish bimonthly NT/Nota columns from CH, CONS, MD, recovery and attendance columns.
 
 The current browser workflow is specific to the GEMUL school system and requires an authorized account. The interface is in Portuguese. This project does not train a machine learning model.
 

@@ -64,6 +64,34 @@ def planejar_extras(opcoes, extras):
     return encontradas, ausentes
 
 
+def normalizar_observacao_conceitos(texto):
+    """Group explicit letter concepts without changing their subject assignments."""
+    def agrupar(match):
+        itens = [item.strip() for item in match.group('itens').split(';')]
+        grupos = {}
+        for item in itens:
+            par = re.fullmatch(r'(.+?)\s*\(([A-Za-z][A-Za-z0-9+-]*)\)', item)
+            if not par:
+                return match.group(0)
+            nome, sigla = par.groups()
+            grupos.setdefault(sigla.upper(), [])
+            if nome.strip() not in grupos[sigla.upper()]:
+                grupos[sigla.upper()].append(nome.strip())
+        return ' '.join(
+            f'Aluno(a) recebeu o conceito "{sigla}" '
+            + ('na matéria: ' if len(nomes) == 1 else 'nas matérias: ')
+            + '; '.join(nomes) + '.'
+            for sigla, nomes in grupos.items())
+
+    texto = re.sub(
+        r'Aluno\(a\) recebeu conceitos nas mat[eé]rias\s*:\s*(?P<itens>[^.]+)\.',
+        agrupar, str(texto or ''), flags=re.I)
+    return re.sub(
+        r'(Aluno\(a\) recebeu o conceito "[^"]+" )(?P<prep>na|nas) mat[eé]rias?\s*:?\s*',
+        lambda m: m.group(1) + ('na matéria: ' if m.group('prep').lower() == 'na' else 'nas matérias: '),
+        texto, flags=re.I)
+
+
 def limpar_observacao(texto, catalogo=DISCIPLINAS):
     """Remove grade summaries; unavailable subjects are appended from structured data."""
     texto = str(texto or '')
@@ -206,7 +234,22 @@ def acrescentar_observacao(pagina, url_lista, ano, serie, escola, texto, localiz
         if botao.count() != 1:
             botao = linha.locator('button[onclick*="editar" i]:not([onclick*="editarDisciplinas" i]), button[onclick*="alterar" i]')
         if botao.count() != 1:
-            raise RuntimeError('Botao de edicao do historico nao identificado; observacoes nao gravadas.')
+            # GEMUL also renders edit actions as links or icon-only controls.
+            marcados = linha.evaluate("""row => {
+                const controls = Array.from(row.querySelectorAll('a,button,input[type=button],input[type=submit]'));
+                const matches = controls.filter(el => {
+                    const action = [el.textContent, el.value, el.title, el.getAttribute('aria-label'),
+                        el.getAttribute('data-original-title'), el.getAttribute('onclick'), el.getAttribute('href'),
+                        ...Array.from(el.querySelectorAll('i,span')).map(icon => icon.className)].join(' ');
+                    return !/editarDisciplinas|excluir|delet|remover/i.test(action) &&
+                        /editar|alterar|pencil|fa-edit|sca_historico_escolar_novo\.asp/i.test(action);
+                });
+                matches.forEach(el => el.setAttribute('data-scholarflow-editar', 'true'));
+                return matches.length;
+            }""")
+            botao = linha.locator('[data-scholarflow-editar="true"]')
+            if marcados != 1:
+                raise RuntimeError('Notas gravadas; nao foi possivel identificar a edicao das observacoes do historico.')
         botao.click()
         campo = pagina.locator('#txtObservacao')
         campo.wait_for(state='attached', timeout=timeout_ms)
@@ -223,7 +266,7 @@ def acrescentar_observacao(pagina, url_lista, ano, serie, escola, texto, localiz
         campo.fill(novo)
         if alterar_geral:
             geral.fill('')
-        salvar = pagina.get_by_role('button', name=re.compile(r'^(Alterar|Salvar)$', re.I))
+        salvar = pagina.get_by_role('button', name=re.compile(r'^(Alterar|Salvar|Gravar)( historico)?$', re.I))
         if salvar.count() != 1:
             raise RuntimeError('Botao para salvar observacoes nao identificado no GEMUL.')
         with pagina.expect_navigation(wait_until='domcontentloaded', timeout=timeout_ms):

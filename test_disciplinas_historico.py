@@ -159,7 +159,7 @@ class DisciplinasTests(unittest.TestCase):
                     escape(general[0]) + '</textarea><button>Salvar</button></form>')
             else:
                 route.fulfill(content_type='text/html', body=
-                    '<table><tr><td>2024</td><td><button onclick="location.href=&quot;/edit&quot;">Editar</button>'
+                    '<table><tr><td>2024</td><td><a href="/edit" title="Alterar" style="display:inline-block;width:20px;height:20px"><i class="fa fa-pencil"></i></a>'
                     '<button onclick="editarDisciplinas()">Editar Disciplinas</button></td></tr></table>')
         self.page.route('**/*', serve)
         for _ in range(2):
