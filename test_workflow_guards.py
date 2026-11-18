@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import credenciais_locais
 import student_transfer
+import sessao_gemul
 from student_sync import normalizar
 
 
@@ -23,7 +24,7 @@ class WorkflowTests(unittest.TestCase):
         self.page.locator.return_value.input_value.return_value = '202654726'
         self.page.locator.return_value.count.return_value = 0
         self.env = dict(Dict=Dict, Any=Any, re=re, datetime=datetime, time=Mock(time=Mock(return_value=1)),
-                        student_transfer=student_transfer,
+                        student_transfer=student_transfer, sessao_gemul=Mock(),
                         localizar_csv_rel_aluno=lambda: 'base-teste.csv',
                         carregar_rel_aluno_csv=Mock(return_value=[dict(matricula='202654726',
                             nome_aluno='ALUNA TESTE', situacao='TRANSFERIDO')]),
@@ -86,6 +87,30 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'matrícula'):
             self.env['executar_lancamento_historico'](self.data)
         self.assertFalse(self.env['SerieEscolhida'].mock_calls)
+
+    def test_logout_after_header_save_resumes_without_duplicate_header(self):
+        self.env['sessao_gemul'] = sessao_gemul
+        self.page.url = 'https://example.test/app/historico.asp'
+        self.page.is_closed.return_value = False
+        self.page.locator.return_value.is_visible.return_value = False
+        self.page.locator.return_value.count.return_value = 1
+        rows = self.page.locator.return_value.filter.return_value.evaluate_all
+        rows.return_value = []
+
+        def salvar_e_deslogar(*args):
+            rows.return_value = [['2026', 'Anual', 'ESCOLA A', 'ENSINO FUNDAMENTAL', '3 ANO']]
+            raise sessao_gemul.SessaoExpirada('Login expirou após salvar o cabeçalho')
+
+        self.env['SerieEscolhida'].ano3.side_effect = salvar_e_deslogar
+        self.env['disciplinas_historico'].cadastrar.return_value = 8
+        recuperar = Mock()
+        result = sessao_gemul.executar_com_recuperacao(
+            lambda: self.env['executar_lancamento_historico'](self.data),
+            lambda: self.page, recuperar, Mock())
+        self.assertIn('8 disciplinas', result)
+        recuperar.assert_called_once()
+        self.env['SerieEscolhida'].ano3.assert_called_once()
+        self.env['disciplinas_historico'].cadastrar.assert_called_once()
 
     def test_non_transferred_student_blocked_before_browser_or_insertion(self):
         self.env['carregar_rel_aluno_csv'].return_value[0]['situacao'] = 'ATIVO'

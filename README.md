@@ -72,6 +72,10 @@ Set `GEMUL_USERNAME` and `GEMUL_PASSWORD` in your local environment, or enter th
 
 Additional isolated checks: `python -m unittest test_student_sync.py`.
 
+Before each history or bimonthly-grade submission, ScholarFlow requests the history page again to check the GEMUL session on the server. Expired sessions are authenticated again using the existing credential flow. A logout detected during submission allows one recovery and resumption attempt; other errors stop the operation. Resumption uses the existing history/grade checks to avoid duplicate headers and to verify saved grades. Cancelling authentication stops the operation.
+
+A foreground window displays submission progress and keeps the result visible until closed, including interruptions and existing-record notices. Checks: `python -m unittest test_sessao_gemul test_workflow_guards test_credenciais_login test_boletim_bimestral -q`.
+
 ## Opções de operação e desenvolvimento
 
 - **Duplicação:** antes de incluir, o programa consulta a lista atual do GEMUL. Se já existir registro para o mesmo ano, série e escola, informa que o lançamento já está cadastrado e encerra a operação sem incluir disciplinas ou outro cabeçalho. Não retoma automaticamente registros parcialmente preenchidos.

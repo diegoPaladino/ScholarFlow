@@ -7,6 +7,8 @@ import cobranca_historico
 import student_transfer
 import disciplinas_historico
 import boletim_bimestral
+import sessao_gemul
+from progresso_operacao import ProgressoOperacao
 from student_sync import atualizar_base_diaria, base_atualizada_hoje, verificar_espaco
 from datetime import datetime
 import json
@@ -281,6 +283,7 @@ def solicitar_credenciais_gemul(forcar_dialogo=False):
 
     class LoginDialog(simpledialog.Dialog):
         def body(self, master):
+            self.attributes('-topmost', True)
             self.usuario = tk.StringVar(value=os.getenv('GEMUL_USERNAME') or salvas.get('usuario', ''))
             self.senha = tk.StringVar(value=os.getenv('GEMUL_PASSWORD') or salvas.get('senha', ''))
             self.lembrar = tk.BooleanVar(value=bool(salvas))
@@ -352,6 +355,17 @@ def registrar_etapa_historico(etapa, pagina=None, **detalhes):
     evento = {"data_hora": datetime.now().astimezone().isoformat(), "etapa": etapa,
               "url": getattr(pagina, "url", ""), **detalhes}
     print("HISTORICO " + json.dumps(evento, ensure_ascii=False, default=str))
+    mensagens = {
+        'inicio_lancamento': 'Conferindo o histórico do aluno no GEMUL...',
+        'selecionar_registro': 'Localizando o registro do ano e da série...',
+        'disciplinas_abertas': 'Conferindo e lançando as disciplinas...',
+        'salvar_cabecalho': 'Salvando os dados do histórico...',
+        'carga_horaria_preenchida': 'Carga horária preenchida. Prosseguindo...',
+        'disciplinas_confirmadas': 'Disciplinas conferidas no GEMUL...',
+        'concluido': 'Lançamento concluído.',
+    }
+    if etapa in mensagens:
+        sessao_gemul.informar_progresso(mensagens[etapa])
 
 
 def indice_registro_historico(linhas, ano, serie, escola):
@@ -3804,7 +3818,9 @@ def garantir_tela_historico_disponivel(force_reabrir: bool = False) -> bool:
     try:
         pagina_destino = pagina if pagina_playwright_ativa(pagina) else context.new_page()
         configurar_dialogos_automaticos(pagina_destino)
-        FuncoesDoPrograma.abrir_novas_abas_pw(pagina_destino)
+        sessao_gemul.abrir_historico_autenticado(
+            pagina_destino, GEMUL_HISTORICO_URL, FuncoesDoPrograma.logar_pw,
+            FuncoesDoPrograma.abrir_novas_abas_pw, sessao_gemul.informar_progresso)
         driver = pagina_destino
         seletor = SelecionarCurso(driver)
         sessao_execucao["matricula_atual"] = ""
@@ -3812,6 +3828,10 @@ def garantir_tela_historico_disponivel(force_reabrir: bool = False) -> bool:
         return True
     except Exception as exc:
         print(f"Nao foi possivel recriar a tela de historico com a sessao atual: {exc}")
+        if isinstance(exc, sessao_gemul.FalhaAutenticacao):
+            raise
+        if pagina_playwright_ativa(pagina) and sessao_gemul.sessao_expirada(pagina):
+            raise
         return False
 
 
@@ -3833,6 +3853,7 @@ def garantir_sessao_gemul(numero_matricula: str = "", force_reabrir_tela: bool =
         precisa_reinicializar = True
 
     if precisa_reinicializar:
+        sessao_gemul.informar_progresso('Abrindo o navegador e entrando no GEMUL...')
         print("Inicializando navegador e autenticando no sistema...")
         try:
             driver = FuncoesDoPrograma.abrir_chrome()
@@ -3848,9 +3869,13 @@ def garantir_sessao_gemul(numero_matricula: str = "", force_reabrir_tela: bool =
     if matricula and sessao_execucao["matricula_atual"] != matricula:
         print(f"Carregando matricula {matricula} na tela de historico...")
         digita_matricula_pw(driver, matricula)
-        Atalho.tab()
-        time.sleep(2)
-        Atalho.enter()
+        pagina = _get_base(driver)
+        pagina.wait_for_load_state('domcontentloaded', timeout=30000)
+        sessao_gemul.exigir_sessao(pagina)
+        campo = pagina.locator('#txtMatricula')
+        campo.wait_for(state='visible', timeout=15000)
+        if campo.input_value().strip() != matricula:
+            raise RuntimeError('O GEMUL não confirmou a matrícula solicitada.')
         sessao_execucao["matricula_atual"] = matricula
 
     return driver
@@ -3863,7 +3888,7 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     student_transfer.exigir_transferido(carregar_rel_aluno_csv(localizar_csv_rel_aluno()),
                                        numero_matricula, dados.get("nome_aluno", ""),
                                        permitir_ativo=dados.get("situacao_ativo_confirmada") is True)
-    driver_ativo = garantir_sessao_gemul(numero_matricula)
+    driver_ativo = garantir_sessao_gemul(numero_matricula, force_reabrir_tela=True)
 
     serie_bruta = str(dados.get("serie", "") or "").strip()
     serie = normalizar_serie(serie_bruta) or serie_bruta
@@ -3891,6 +3916,7 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     inicio_lancamento = time.time()
     pagina = _get_base(driver_ativo)
     pagina.goto(f"{GEMUL_HISTORICO_URL}?txtMatricula={numero_matricula}", wait_until="domcontentloaded")
+    sessao_gemul.exigir_sessao(pagina)
     pagina.locator('#txtMatricula').wait_for(state="visible", timeout=15000)
     if pagina.locator('#txtMatricula').input_value().strip() != numero_matricula:
         raise RuntimeError('A matrícula exibida no GEMUL não corresponde à matrícula informada. Lançamento bloqueado.')
@@ -3924,6 +3950,7 @@ def executar_lancamento_historico(dados: Dict[str, Any]) -> str:
     else:
         raise ValueError(f"Serie nao suportada para lancamento: {serie_bruta}")
 
+    sessao_gemul.exigir_sessao(pagina)
     duracao = formatar_duracao(time.time() - inicio_lancamento)
     mensagem = f"Lancamento concluido para {serie} em {duracao}."
     if dados.get("resumo_disciplinas_extra"):
@@ -4270,6 +4297,10 @@ def obter_matricula():
             return
 
         lancamento_em_andamento["ativo"] = True
+        painel = ProgressoOperacao(root,
+            f"Histórico — matrícula {numero_matricula}\n"
+            f"{dados_formulario['ano']} — {dados_formulario['serie']}")
+        sessao_gemul.progresso = painel.atualizar
         if botao_ok is not None:
             botao_ok.state(["disabled"])
         status_scan_var.set(f"Lancando {dados_formulario['serie']}...")
@@ -4289,27 +4320,34 @@ def obter_matricula():
             print(f"Falha ao persistir formulario da matricula {numero_matricula}: {exc}")
 
         try:
-            mensagem = executar_lancamento_historico(dados_formulario)
+            mensagem = sessao_gemul.executar_com_recuperacao(
+                lambda: executar_lancamento_historico(dados_formulario),
+                lambda: _get_base(driver),
+                lambda: garantir_sessao_gemul(numero_matricula, force_reabrir_tela=True),
+                painel.atualizar)
         except Exception as exc:
             traceback.print_exc()
             registrar_etapa_historico("falha", _get_base(driver), erro=str(exc), alvo=sessao_execucao.get("historico_alvo"))
             erro_texto = str(exc)
             status_scan_var.set(f"Falha no lancamento: {erro_texto}. Sessao mantida para nova tentativa.")
+            painel.concluir(f"Lançamento interrompido: {erro_texto}", falha=True)
             messagebox.showerror(
                 "Falha no lancamento",
                 f"{erro_texto}\n\nA sessao do navegador foi mantida. "
                 "Use \"RECUPERAR GEMUL\" ou tente novamente.",
-                parent=root,
+                parent=painel.janela,
             )
         else:
             status_scan_var.set(mensagem)
+            painel.concluir(mensagem)
             if dados_formulario.get("aviso_observacoes"):
-                messagebox.showwarning("Notas gravadas; observacoes pendentes", dados_formulario["aviso_observacoes"], parent=root)
+                messagebox.showwarning("Notas gravadas; observacoes pendentes", dados_formulario["aviso_observacoes"], parent=painel.janela)
             if dados_formulario.get("resumo_disciplinas_extra"):
-                messagebox.showinfo("Disciplinas extras", dados_formulario["resumo_disciplinas_extra"], parent=root)
+                messagebox.showinfo("Disciplinas extras", dados_formulario["resumo_disciplinas_extra"], parent=painel.janela)
             if mensagem.startswith('Registro já existente:'):
-                messagebox.showinfo('Lançamento já cadastrado', mensagem, parent=root)
+                messagebox.showinfo('Lançamento já cadastrado', mensagem, parent=painel.janela)
         finally:
+            sessao_gemul.progresso = None
             lancamento_em_andamento["ativo"] = False
             if botao_ok is not None:
                 botao_ok.state(["!disabled"])
@@ -5863,6 +5901,7 @@ def obter_matricula():
         def lancar_boletim_no_gemul():
             if lancamento_em_andamento['ativo'] or ocr_estado['ativo']:
                 return
+            painel = None
             try:
                 validado = salvar_revisao()
                 boletim_bimestral.exigir_ano_corrente(validado)
@@ -5874,24 +5913,38 @@ def obter_matricula():
                 botao_lancar_boletim.state(['disabled'])
                 janela.configure(cursor='watch')
                 janela.update_idletasks()
+                painel = ProgressoOperacao(janela, f'Notas bimestrais — matrícula {matricula}')
+                sessao_gemul.progresso = painel.atualizar
 
                 def atualizar_progresso(mensagem):
                     status_boletim_var.set(mensagem)
                     progresso_boletim_var.set(mensagem)
                     janela.update_idletasks()
+                    painel.atualizar(mensagem)
 
-                pagina = _get_base(garantir_sessao_gemul(matricula))
-                retorno = boletim_bimestral.lancar(pagina, GEMUL_BASE_URL, validado, turma_destino,
-                                                   progresso=atualizar_progresso)
+                def executar_boletim():
+                    pagina = _get_base(garantir_sessao_gemul(matricula, force_reabrir_tela=True))
+                    return boletim_bimestral.lancar(pagina, GEMUL_BASE_URL, validado, turma_destino,
+                                                    progresso=atualizar_progresso)
+
+                retorno = sessao_gemul.executar_com_recuperacao(
+                    executar_boletim, lambda: _get_base(driver),
+                    lambda: garantir_sessao_gemul(matricula, force_reabrir_tela=True),
+                    atualizar_progresso)
                 status_boletim_var.set(retorno['mensagem'])
                 progresso_boletim_var.set(retorno['mensagem'])
+                painel.concluir(retorno['mensagem'])
                 messagebox.showinfo('Notas bimestrais gravadas' if retorno['notas'] else 'Boletim sem disciplinas disponíveis',
-                                    retorno['mensagem'], parent=janela)
+                                    retorno['mensagem'], parent=painel.janela)
             except Exception as exc:
                 status_boletim_var.set(f'Lançamento bimestral interrompido: {exc}')
                 progresso_boletim_var.set(str(exc))
-                messagebox.showwarning('Conferência das notas bimestrais', str(exc), parent=janela)
+                if painel is not None:
+                    painel.concluir(f'Lançamento interrompido: {exc}', falha=True)
+                messagebox.showwarning('Conferência das notas bimestrais', str(exc),
+                                       parent=painel.janela if painel else janela)
             finally:
+                sessao_gemul.progresso = None
                 lancamento_em_andamento['ativo'] = False
                 botao_lancar_boletim.state(['!disabled'])
                 janela.configure(cursor='')
