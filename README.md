@@ -76,6 +76,8 @@ Before each history or bimonthly-grade submission, ScholarFlow requests the hist
 
 A foreground window displays submission progress and keeps the result visible until closed, including interruptions and existing-record notices. Checks: `python -m unittest test_sessao_gemul test_workflow_guards test_credenciais_login test_boletim_bimestral -q`.
 
+Manual file selection for histories, identity documents and report cards always starts in the Windows Pictures folder (including redirected locations). The image area selector supports 90-degree rotation in either direction. Rotation clears the previous crop; the selected rotation is applied before cropping and OCR without modifying the source file. OCR cache keys include the rotation and crop. Checks: `python -m unittest test_orientacao_ocr -q`.
+
 ## Opções de operação e desenvolvimento
 
 - **Duplicação:** antes de incluir, o programa consulta a lista atual do GEMUL. Se já existir registro para o mesmo ano, série e escola, informa que o lançamento já está cadastrado e encerra a operação sem incluir disciplinas ou outro cabeçalho. Não retoma automaticamente registros parcialmente preenchidos.

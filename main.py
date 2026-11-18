@@ -2452,7 +2452,7 @@ def calcular_hash_arquivo(caminho: str) -> str:
 
 def calcular_chave_cache_ocr_arquivos(
     caminhos_arquivo: List[str],
-    recortes_por_arquivo: Dict[str, Tuple[int, int, int, int]],
+    recortes_por_arquivo: Dict[str, Any],
     modelo: str,
 ) -> str:
     h = hashlib.sha256()
@@ -2467,8 +2467,8 @@ def calcular_chave_cache_ocr_arquivos(
         h.update(os.path.basename(caminho_limpo).encode("utf-8", errors="ignore"))
         h.update(str(os.path.getsize(caminho_limpo)).encode("ascii"))
         h.update(calcular_hash_arquivo(caminho_limpo).encode("ascii"))
-        recorte = recortes_por_arquivo.get(caminho_limpo)
-        h.update(repr(tuple(recorte) if recorte else None).encode("ascii"))
+        recorte, rotacao = transformacao_selecao_ocr(recortes_por_arquivo.get(caminho_limpo))
+        h.update(repr((tuple(recorte) if recorte else None, rotacao)).encode("ascii"))
     return h.hexdigest()
 
 
@@ -3298,6 +3298,26 @@ def carregar_imagem_ocr(caminho_arquivo):
         return ImageOps.exif_transpose(imagem_origem).convert('RGB')
 
 
+def obter_pasta_imagens():
+    if os.name == 'nt':
+        import ctypes
+        pasta = ctypes.create_unicode_buffer(32768)
+        # CSIDL_MYPICTURES resolves the Windows Pictures folder, including redirection.
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x27, None, 0, pasta) == 0 and pasta.value:
+            return pasta.value
+    for nome in ('Pictures', 'Imagens'):
+        pasta = os.path.join(os.path.expanduser('~'), nome)
+        if os.path.isdir(pasta):
+            return pasta
+    return os.path.expanduser('~')
+
+
+def transformacao_selecao_ocr(selecao):
+    if isinstance(selecao, dict):
+        return selecao.get('coords'), int(selecao.get('rotacao', 0)) % 360
+    return selecao, 0
+
+
 def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titulo: str) -> Any:
     extensao = os.path.splitext(str(caminho_arquivo or ""))[1].lower()
     if extensao not in OCR_IMAGE_EXTENSIONS:
@@ -3345,6 +3365,7 @@ def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titul
         "retangulo": None,
         "coords": None,
         "cancelado": False,
+        "rotacao": 0,
     }
     status_var = tk.StringVar(value="Selecione uma area e pressione Enter para continuar.")
 
@@ -3400,12 +3421,32 @@ def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titul
 
     resultado = {"valor": None}
 
+    def girar(graus):
+        nonlocal imagem, escala, largura_exibicao, altura_exibicao
+        imagem = imagem.rotate(-graus, expand=True)
+        estado['rotacao'] = (estado['rotacao'] + graus) % 360
+        estado.update(inicio=None, retangulo=None, coords=None)
+        escala = min(limite_largura / imagem.width, limite_altura / imagem.height, 1.0)
+        largura_exibicao = max(1, int(imagem.width * escala))
+        altura_exibicao = max(1, int(imagem.height * escala))
+        exibicao = imagem.resize((largura_exibicao, altura_exibicao), Image.LANCZOS)
+        canvas.delete('all')
+        canvas.configure(width=largura_exibicao, height=altura_exibicao)
+        canvas.image = ImageTk.PhotoImage(exibicao)
+        canvas.create_image(0, 0, anchor='nw', image=canvas.image)
+        status_var.set('Imagem girada. Selecione a área novamente ou use Imagem inteira.')
+
+    def selecao_atual(coords):
+        if estado['rotacao']:
+            return {'coords': coords, 'rotacao': estado['rotacao']}
+        return coords
+
     def confirmar():
-        resultado["valor"] = estado["coords"]
+        resultado["valor"] = selecao_atual(estado["coords"])
         janela.destroy()
 
     def usar_imagem_inteira():
-        resultado["valor"] = None
+        resultado["valor"] = selecao_atual(None)
         janela.destroy()
 
     def cancelar():
@@ -3419,6 +3460,8 @@ def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titul
     frame_botoes.pack(fill="x", padx=10, pady=(0, 10))
     ttk.Button(frame_botoes, text="Confirmar recorte", command=confirmar).pack(side="left")
     ttk.Button(frame_botoes, text="Imagem inteira", command=usar_imagem_inteira).pack(side="left", padx=8)
+    ttk.Button(frame_botoes, text="Girar 90° à esquerda", command=lambda: girar(-90)).pack(side="left", padx=4)
+    ttk.Button(frame_botoes, text="Girar 90° à direita", command=lambda: girar(90)).pack(side="left", padx=4)
     ttk.Button(frame_botoes, text="Cancelar", command=cancelar).pack(side="right")
 
     janela.bind("<Return>", lambda _event: confirmar())
@@ -3432,7 +3475,7 @@ def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titul
 
 
 def coletar_recortes_ocr(parent: tk.Misc, caminhos: List[str], titulo_prefixo: str) -> Any:
-    recortes: Dict[str, Tuple[int, int, int, int]] = {}
+    recortes: Dict[str, Any] = {}
     imagens = [str(c).strip() for c in caminhos if os.path.splitext(str(c).strip())[1].lower() in OCR_IMAGE_EXTENSIONS]
     for indice, caminho in enumerate(imagens, start=1):
         titulo = f"{titulo_prefixo} ({indice}/{len(imagens)}) - {os.path.basename(caminho)}"
@@ -3446,7 +3489,7 @@ def coletar_recortes_ocr(parent: tk.Misc, caminhos: List[str], titulo_prefixo: s
 
 def preparar_caminhos_para_ocr(
     caminhos_arquivo: List[str],
-    recortes_por_arquivo: Dict[str, Tuple[int, int, int, int]],
+    recortes_por_arquivo: Dict[str, Any],
 ) -> Tuple[List[str], List[str]]:
     caminhos_processados: List[str] = []
     temporarios: List[str] = []
@@ -3454,12 +3497,14 @@ def preparar_caminhos_para_ocr(
     for caminho in caminhos_arquivo:
         caminho_limpo = str(caminho or "").strip()
         extensao = os.path.splitext(caminho_limpo)[1].lower()
-        recorte = recortes_por_arquivo.get(caminho_limpo)
+        recorte, rotacao = transformacao_selecao_ocr(recortes_por_arquivo.get(caminho_limpo))
         if extensao not in OCR_IMAGE_EXTENSIONS:
             caminhos_processados.append(caminho_limpo)
             continue
 
         with carregar_imagem_ocr(caminho_limpo) as imagem:
+            if rotacao:
+                imagem = imagem.rotate(-rotacao, expand=True)
             if recorte:
                 esquerda, topo, direita, baixo = recorte
                 esquerda = max(0, min(esquerda, imagem.width))
@@ -4020,8 +4065,8 @@ def obter_matricula():
     arquivos_scan_paths: List[str] = []
     arquivos_documento_paths: List[str] = []
     estado_boletim = {"matricula": "", "resultado": None, "arquivos": [], "recortes": {}}
-    recortes_historico_por_arquivo: Dict[str, Tuple[int, int, int, int]] = {}
-    recortes_documento_por_arquivo: Dict[str, Tuple[int, int, int, int]] = {}
+    recortes_historico_por_arquivo: Dict[str, Any] = {}
+    recortes_documento_por_arquivo: Dict[str, Any] = {}
 
     numero_matricula_var = tk.StringVar()
     ano_var = tk.StringVar()
@@ -4792,7 +4837,7 @@ def obter_matricula():
         return [parte.strip() for parte in re.split(r"\s*\|\s*|\s*;\s*", texto) if parte.strip()]
 
     def selecionar_arquivo_scan():
-        diretorio_inicial = AUTO_HISTORICO_DIR if os.path.isdir(AUTO_HISTORICO_DIR) else os.path.dirname(os.path.abspath(__file__))
+        diretorio_inicial = obter_pasta_imagens()
         caminhos = filedialog.askopenfilenames(
             parent=root,
             title="Selecione um ou mais arquivos do historico",
@@ -4821,7 +4866,7 @@ def obter_matricula():
             )
 
     def selecionar_arquivo_documento():
-        diretorio_inicial = AUTO_HISTORICO_DIR if os.path.isdir(AUTO_HISTORICO_DIR) else os.path.dirname(os.path.abspath(__file__))
+        diretorio_inicial = obter_pasta_imagens()
         caminhos = filedialog.askopenfilenames(
             parent=root,
             title="Selecione imagem(ns) de certidao de nascimento ou RG",
@@ -5772,7 +5817,7 @@ def obter_matricula():
         if ocr_estado['ativo']:
             return
         caminhos = filedialog.askopenfilenames(parent=root, title='Selecione somente o boletim bimestral',
-            initialdir=AUTO_HISTORICO_DIR if os.path.isdir(AUTO_HISTORICO_DIR) else os.path.dirname(__file__),
+            initialdir=obter_pasta_imagens(),
             filetypes=[('Arquivos suportados', '*.png *.jpg *.jpeg *.webp *.tif *.tiff *.pdf *.txt')])
         if not caminhos:
             return
