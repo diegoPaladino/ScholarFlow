@@ -26,6 +26,39 @@ class ReportCardTests(unittest.TestCase):
         self.assertEqual([n['nota'] for n in result['notas']], ['0', '8.5'])
         self.assertEqual(result['notas'][0]['bimestre'], '1')
 
+    def test_interface_year_overrides_missing_invalid_or_different_document_year(self):
+        for extracted in (None, '', '01/10/2026', 'não identificado', '2025'):
+            with self.subTest(extracted=extracted):
+                data = dict(self.data, ano=extracted)
+                result = boletim.validar(data, self.matricula, ano_selecionado='2026')
+                self.assertEqual(result['ano'], '2026')
+                self.assertEqual(result['notas'][0]['nota'], '0')
+                self.assertEqual(data['ano'], extracted)
+        data = dict(self.data)
+        del data['ano']
+        self.assertEqual(boletim.validar(data, self.matricula, ano_selecionado='2026')['ano'], '2026')
+
+    def test_invalid_interface_year_does_not_fall_back_to_document_year(self):
+        for year in ('', '26', '2026/2027'):
+            with self.subTest(year=year), self.assertRaisesRegex(ValueError, 'interface'):
+                boletim.validar(self.data, self.matricula, ano_selecionado=year)
+
+    def test_cache_uses_selected_year_even_when_document_year_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            boletim.salvar(directory, self.matricula, dict(self.data, ano='2024'), ['anterior.png'])
+            result = boletim.salvar(directory, self.matricula, dict(self.data, ano=''),
+                                     ['boletim.png'], 'ALUNA TESTE', ano_selecionado='2026')
+            self.assertEqual(result['ano'], '2026')
+            cached = boletim.carregar(directory, self.matricula)
+            self.assertEqual(cached['ultimo_ano'], '2026')
+            self.assertEqual(set(cached['boletins']), {'2024', '2026'})
+            self.assertEqual(cached['boletins']['2026']['notas'][0]['nota'], '0')
+
+    def test_selected_year_does_not_bypass_student_name_check(self):
+        with self.assertRaisesRegex(ValueError, 'nome do boletim'):
+            boletim.validar(dict(self.data, ano=''), self.matricula,
+                           'OUTRO ESTUDANTE', ano_selecionado='2026')
+
     def test_wrong_student_and_invalid_fields_are_rejected(self):
         for change in ({'ano': ''}, {'notas': []}):
             with self.subTest(change=change), self.assertRaises(ValueError):

@@ -16,6 +16,8 @@ Civil-document comparison highlights only mismatches, including missing fields. 
 
 Report cards may come from other school systems: the printed source registration is stored separately from the selected GEMUL registration. The student's name is still checked, and the browser workflow checks the destination registration before submitting. Only the standard GEMUL subjects are used for report cards; other subjects and subjects absent from the destination class are ignored without adding observations. Explicit aliases such as Arte → Artes are accepted, while Matemática Lúdica and Leitura e Fluência are not merged into standard subjects. Blank cells and dashes are omitted; numeric zero is retained. The AI reading instructions distinguish bimonthly NT/Nota columns from CH, CONS, MD, recovery and attendance columns.
 
+The year selected in the main interface determines the report card's destination year, even if the document year is missing, unreadable or different. The selected year is captured before AI reading and used for validation and local storage. If the selection changes during reading or review, the user must review the destination again. GEMUL submission still checks its current-year restriction.
+
 The current browser workflow is specific to the GEMUL school system and requires an authorized account. The interface is in Portuguese. This project does not train a machine learning model.
 
 ## Run on Windows

@@ -5835,7 +5835,8 @@ def obter_matricula():
             messagebox.showinfo('Boletim', 'Leia um boletim para esta matrícula primeiro.', parent=root)
             return
         try:
-            resultado = boletim_bimestral.validar(resultado, matricula)
+            resultado = boletim_bimestral.validar(
+                resultado, matricula, ano_selecionado=ano_var.get())
             estado_boletim['resultado'] = resultado
         except ValueError as exc:
             messagebox.showwarning('Boletim', str(exc), parent=root)
@@ -5856,7 +5857,7 @@ def obter_matricula():
             turma_cadastro = ''
             status_boletim_var.set(f'Confira a turma do aluno: {exc}')
         turma_boletim = tk.StringVar(value=turma_cadastro)
-        ttk.Label(cabecalho, text=f'Ano do boletim (lançamento permitido somente em {datetime.now().year})').pack(anchor='w')
+        ttk.Label(cabecalho, text=f'Ano selecionado na interface (lançamento no GEMUL permitido somente em {datetime.now().year})').pack(anchor='w')
         ttk.Entry(cabecalho, textvariable=ano_boletim, state='readonly').pack(fill='x')
         ttk.Label(cabecalho, text='Turma do aluno no GEMUL (recuperada do cadastro)').pack(anchor='w')
         ttk.Entry(cabecalho, textvariable=turma_boletim).pack(fill='x')
@@ -5915,6 +5916,8 @@ def obter_matricula():
         def salvar_revisao():
             if re.sub(r'\D', '', numero_matricula_var.get()) != matricula:
                 raise ValueError('A matrícula selecionada mudou. Reabra a revisão do boletim.')
+            if ano_var.get().strip() != ano_boletim.get():
+                raise ValueError('O ano selecionado mudou. Reabra a revisão do boletim para conferir o ano de destino.')
             novo = dict(resultado, ano=ano_boletim.get(), turma=turma_boletim.get(),
                         notas=boletim_bimestral.notas_da_conferencia(
                             [tabela.item(i, 'values') for i in tabela.get_children()]))
@@ -6009,6 +6012,11 @@ def obter_matricula():
         if len(matricula) != 9:
             messagebox.showwarning('Boletim', 'Informe a matrícula com nove dígitos primeiro.', parent=root)
             return
+        try:
+            ano_leitura = exigir_ano_4_digitos(ano_var.get())
+        except ValueError as exc:
+            messagebox.showwarning('Ano do boletim', str(exc), parent=root)
+            return
         if not estado_boletim['arquivos']:
             selecionar_boletim()
         caminhos = list(estado_boletim['arquivos'])
@@ -6034,7 +6042,8 @@ def obter_matricula():
             try:
                 resultado_lido = extrair_campos_boletim_com_openai(processados)
                 resultado_lido = boletim_bimestral.salvar(os.path.dirname(os.path.abspath(__file__)),
-                                                         matricula, resultado_lido, caminhos, nome_leitura)
+                                                         matricula, resultado_lido, caminhos, nome_leitura,
+                                                         ano_selecionado=ano_leitura)
             except Exception as exc:
                 erro = str(exc)
             finally:
@@ -6055,6 +6064,10 @@ def obter_matricula():
                 estado_boletim.update(resultado=resultado_lido, arquivos=caminhos)
                 arquivo_boletim_var.set(' | '.join(caminhos))
                 status_boletim_var.set(f"Boletim {resultado_lido['ano']} salvo. Revise as notas bimestrais.")
+                if ano_var.get().strip() != ano_leitura:
+                    status_boletim_var.set(
+                        f'Boletim salvo no ano {ano_leitura}. O ano selecionado mudou durante a leitura; confira antes de revisar.')
+                    return
                 revisar_boletim()
             root.after(0, concluir)
         threading.Thread(target=worker, daemon=True).start()

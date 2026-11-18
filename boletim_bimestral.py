@@ -29,7 +29,7 @@ SCHEMA = {
 }
 
 
-def validar(resultado, matricula, nome_esperado=''):
+def validar(resultado, matricula, nome_esperado='', *, ano_selecionado=None):
     matricula = re.sub(r'\D', '', str(matricula))
     if len(matricula) != 9:
         raise ValueError('Informe a matrícula com nove dígitos antes de ler o boletim.')
@@ -42,8 +42,10 @@ def validar(resultado, matricula, nome_esperado=''):
     nome = str(resultado.get('nome_aluno') or '').strip()
     if nome_esperado and (not nome or SequenceMatcher(None, normalizar(nome), normalizar(nome_esperado)).ratio() < 0.92):
         raise ValueError('O nome do boletim difere do aluno selecionado. Confira o documento antes de vincular.')
-    ano = str(resultado.get('ano') or '').strip()
+    ano = str(ano_selecionado if ano_selecionado is not None else resultado.get('ano') or '').strip()
     if not re.fullmatch(r'\d{4}', ano):
+        if ano_selecionado is not None:
+            raise ValueError('Selecione um ano válido com quatro dígitos na interface antes de ler o boletim.')
         raise ValueError('Não foi identificado um ano letivo válido no boletim. Confira o documento.')
     notas, identidades = [], {}
     ignoradas = list(resultado.get('disciplinas_ignoradas') or [])
@@ -124,8 +126,8 @@ def carregar(base_dir, matricula):
     return payload
 
 
-def salvar(base_dir, matricula, resultado, arquivos, nome_esperado=''):
-    resultado = validar(resultado, matricula, nome_esperado)
+def salvar(base_dir, matricula, resultado, arquivos, nome_esperado='', *, ano_selecionado=None):
+    resultado = validar(resultado, matricula, nome_esperado, ano_selecionado=ano_selecionado)
     path = caminho_cache(base_dir, matricula)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = carregar(base_dir, matricula) or {'matricula': matricula, 'boletins': {}}
