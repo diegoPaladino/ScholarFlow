@@ -3,4 +3,5 @@ PyAutoGUI
 clipboard
 pyperclip
 Pillow
+PyMuPDF
 tzdata

@@ -1,4 +1,4 @@
-﻿# Bibliotecas
+# Bibliotecas
 # -*- coding: utf-8 -*-
 import time
 import credenciais_locais
@@ -2456,7 +2456,7 @@ def calcular_chave_cache_ocr_arquivos(
     modelo: str,
 ) -> str:
     h = hashlib.sha256()
-    h.update(b"observacoes-ano-geral-v1")
+    h.update(b"observacoes-ano-geral-v2-pdf-visual")
     h.update(str(modelo or "").encode("utf-8"))
     h.update(str(OCR_IA_MAX_IMAGE_SIDE).encode("ascii"))
     h.update(str(OCR_IA_JPEG_QUALITY).encode("ascii"))
@@ -2467,6 +2467,9 @@ def calcular_chave_cache_ocr_arquivos(
         h.update(os.path.basename(caminho_limpo).encode("utf-8", errors="ignore"))
         h.update(str(os.path.getsize(caminho_limpo)).encode("ascii"))
         h.update(calcular_hash_arquivo(caminho_limpo).encode("ascii"))
+        selecao = recortes_por_arquivo.get(caminho_limpo)
+        if isinstance(selecao, dict) and 'paginas' in selecao:
+            h.update(repr(selecao['paginas']).encode('utf-8'))
         recorte, rotacao = transformacao_selecao_ocr(recortes_por_arquivo.get(caminho_limpo))
         h.update(repr((tuple(recorte) if recorte else None, rotacao)).encode("ascii"))
     return h.hexdigest()
@@ -3291,7 +3294,10 @@ OCR_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 OCR_SELECTOR_CANCELLED = object()
 
 
-def carregar_imagem_ocr(caminho_arquivo):
+def carregar_imagem_ocr(caminho_arquivo, pagina=0):
+    if os.path.splitext(str(caminho_arquivo))[1].lower() == '.pdf':
+        from pdf_ocr import renderizar_pagina_pdf
+        return renderizar_pagina_pdf(caminho_arquivo, pagina)
     # Apply the Windows/photo viewer orientation to pixels before cropping or
     # exporting a JPEG, which otherwise loses the source orientation metadata.
     with Image.open(caminho_arquivo) as imagem_origem:
@@ -3318,12 +3324,12 @@ def transformacao_selecao_ocr(selecao):
     return selecao, 0
 
 
-def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titulo: str) -> Any:
+def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titulo: str, pagina=0) -> Any:
     extensao = os.path.splitext(str(caminho_arquivo or ""))[1].lower()
-    if extensao not in OCR_IMAGE_EXTENSIONS:
+    if extensao not in OCR_IMAGE_EXTENSIONS and extensao != '.pdf':
         return None
 
-    imagem = carregar_imagem_ocr(caminho_arquivo)
+    imagem = carregar_imagem_ocr(caminho_arquivo, pagina)
 
     largura_original, altura_original = imagem.size
     largura_tela = max(500, int(parent.winfo_screenwidth()) - 140)
@@ -3476,9 +3482,25 @@ def selecionar_regiao_ocr_em_janela(parent: tk.Misc, caminho_arquivo: str, titul
 
 def coletar_recortes_ocr(parent: tk.Misc, caminhos: List[str], titulo_prefixo: str) -> Any:
     recortes: Dict[str, Any] = {}
-    imagens = [str(c).strip() for c in caminhos if os.path.splitext(str(c).strip())[1].lower() in OCR_IMAGE_EXTENSIONS]
+    imagens = [str(c).strip() for c in caminhos if os.path.splitext(str(c).strip())[1].lower() in OCR_IMAGE_EXTENSIONS | {'.pdf'}]
     for indice, caminho in enumerate(imagens, start=1):
         titulo = f"{titulo_prefixo} ({indice}/{len(imagens)}) - {os.path.basename(caminho)}"
+        if os.path.splitext(caminho)[1].lower() == '.pdf':
+            from pdf_ocr import contar_paginas_pdf
+            try:
+                total = contar_paginas_pdf(caminho)
+                paginas = []
+                for pagina in range(total):
+                    resultado = selecionar_regiao_ocr_em_janela(
+                        parent, caminho, f'{titulo} - Pagina {pagina + 1}/{total}', pagina)
+                    if resultado is OCR_SELECTOR_CANCELLED:
+                        return OCR_SELECTOR_CANCELLED
+                    paginas.append(resultado)
+                recortes[caminho] = {'paginas': paginas}
+                continue
+            except Exception as exc:
+                messagebox.showerror("Carregar PDF", str(exc), parent=parent)
+                return OCR_SELECTOR_CANCELLED
         resultado = selecionar_regiao_ocr_em_janela(parent, caminho, titulo)
         if resultado is OCR_SELECTOR_CANCELLED:
             return OCR_SELECTOR_CANCELLED
@@ -3497,6 +3519,30 @@ def preparar_caminhos_para_ocr(
     for caminho in caminhos_arquivo:
         caminho_limpo = str(caminho or "").strip()
         extensao = os.path.splitext(caminho_limpo)[1].lower()
+        if extensao == '.pdf':
+            from pdf_ocr import contar_paginas_pdf
+            selecao_pdf = recortes_por_arquivo.get(caminho_limpo) or {}
+            paginas = selecao_pdf.get('paginas', [])
+            try:
+                for pagina in range(contar_paginas_pdf(caminho_limpo)):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as arquivo:
+                        renderizado = arquivo.name
+                    try:
+                        with carregar_imagem_ocr(caminho_limpo, pagina) as imagem_pdf:
+                            imagem_pdf.save(renderizado, format='PNG')
+                        selecao = paginas[pagina] if pagina < len(paginas) else None
+                        processados, novos_temporarios = preparar_caminhos_para_ocr(
+                            [renderizado], {renderizado: selecao})
+                        caminhos_processados.extend(processados)
+                        temporarios.extend(novos_temporarios)
+                    finally:
+                        os.remove(renderizado)
+            except Exception:
+                for temporario in temporarios:
+                    if os.path.exists(temporario):
+                        os.remove(temporario)
+                raise
+            continue
         recorte, rotacao = transformacao_selecao_ocr(recortes_por_arquivo.get(caminho_limpo))
         if extensao not in OCR_IMAGE_EXTENSIONS:
             caminhos_processados.append(caminho_limpo)
@@ -3568,7 +3614,17 @@ def construir_conteudo_usuario_arquivos_openai(
             conteudo_usuario.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}"})
             continue
 
-        if extensao in {".pdf", ".txt"}:
+        if extensao == '.pdf':
+            processados, temporarios = preparar_caminhos_para_ocr([caminho_atual], {})
+            try:
+                conteudo_usuario.extend(construir_conteudo_usuario_arquivos_openai(
+                    processados, limite_texto, rotulo_imagem, rotulo_pdf))
+            finally:
+                for temporario in temporarios:
+                    os.remove(temporario)
+            continue
+
+        if extensao == '.txt':
             texto_local = extrair_texto_local(caminho_atual)
             trecho = texto_local[:limite_texto]
             limite_texto = max(0, limite_texto - len(trecho))
