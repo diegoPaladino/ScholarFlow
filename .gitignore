@@ -39,3 +39,10 @@ pagina_cadastro.html
 student_sync_state.json
 student_sync_backups/
 cobranca_historico_*.txt
+
+# DevBridge local state and generated reports
+.dev_bridge/
+DEV_REPORT.md
+DEV_CONTEXT*.txt
+TEST_REPORT.txt
+pacote_SF-IDP-*.json

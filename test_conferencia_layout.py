@@ -58,6 +58,7 @@ class ConferenciaLayoutTests(unittest.TestCase):
         env = dict(tk=tk, ttk=ttk, root=self.root, re=re, os=os, datetime=datetime,
                    __file__=str(Path('main.py').resolve()), boletim_bimestral=boletim,
                    estado_boletim=state, numero_matricula_var=tk.StringVar(self.root, value='202600001'),
+                   ano_var=tk.StringVar(self.root, value='2026'),
                    status_boletim_var=tk.StringVar(self.root), carregar_base_rel_aluno=lambda: [],
                    messagebox=Mock())
         self.load('revisar_boletim', env)()
