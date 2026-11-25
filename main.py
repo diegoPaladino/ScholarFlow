@@ -3232,6 +3232,8 @@ def enviar_requisicao_openai_com_retry(
     if requests is not None:
         for tentativa in range(1, tentativas + 1):
             try:
+                from idp_observability import record_attempt
+                record_attempt("requests")
                 resposta_http = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 if tentativa < tentativas and resposta_http.status_code in codigos_retry:
                     ultimo_erro = RuntimeError(
@@ -3258,6 +3260,8 @@ def enviar_requisicao_openai_com_retry(
 
     for tentativa in range(1, tentativas + 1):
         try:
+            from idp_observability import record_attempt
+            record_attempt("urllib")
             with urllib.request.urlopen(request, timeout=timeout, context=contexto_ssl) as resposta_http:
                 return resposta_http.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
@@ -3639,211 +3643,221 @@ def construir_conteudo_usuario_arquivos_openai(
 
 
 def extrair_campos_historico_com_openai(caminho_arquivo: Any, model: str = "") -> Dict[str, Any]:
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY nao configurada. Defina a variavel de ambiente antes de usar 'Ler com IA'."
+    from idp_observability import extraction, record_usage
+    with extraction("historico", model or globals().get("OCR_IA_MODEL_PADRAO", "")):
+        api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY nao configurada. Defina a variavel de ambiente antes de usar 'Ler com IA'."
+            )
+
+        if isinstance(caminho_arquivo, (list, tuple, set)):
+            caminhos_arquivo = [str(item).strip() for item in caminho_arquivo if str(item).strip()]
+        else:
+            caminho_unico = str(caminho_arquivo or "").strip()
+            caminhos_arquivo = [caminho_unico] if caminho_unico else []
+
+        if not caminhos_arquivo:
+            raise ValueError("Nenhum arquivo foi informado para leitura por IA.")
+
+        for caminho in caminhos_arquivo:
+            if not os.path.exists(caminho):
+                raise FileNotFoundError(f"Arquivo nao encontrado: {caminho}")
+
+        prompt_base = carregar_prompt_historico() + (
+            " Separe as observacoes por abrangencia: txt_observacoes contem somente informacoes "
+            "do ano/serie correspondente e ocorrencias daquele ano. "
+            "txt_observacoes_gerais contem somente informacoes que se aplicam ao historico inteiro, "
+            "sem vinculo com um ano especifico. Uma observacao intitulada geral mas que mencione "
+            "um ano/serie deve ser atribuida a esse ano em txt_observacoes. "
+            "Retorne a observacao geral no nivel principal e a mesma observacao em cada item de historicos. "
+            "Nao duplique o mesmo texto entre os dois campos, nao invente observacoes e use string vazia "
+            "quando nao houver informacao. Se a abrangencia for incerta, mantenha no ano associado "
+            "pelo documento e preserve o texto para revisao. "
+            "Registre todas as disciplinas extras em disciplinas_extra, com disciplina e nota, "
+            "sem repetir essas notas em txt_observacoes. Para conceitos, use a frase padrao "
+            "Aluno(a) recebeu o conceito \"SIGLA\" nas matérias: NOME; NOME. "
+            "Agrupe as matérias por conceito, sem repetir a sigla após cada matéria. "
+            "Quando houver conceitos diferentes, use uma frase por conceito, preservando cada avaliação. "
+            "A observacao geral sera usada somente para conferencia local do usuario."
         )
-
-    if isinstance(caminho_arquivo, (list, tuple, set)):
-        caminhos_arquivo = [str(item).strip() for item in caminho_arquivo if str(item).strip()]
-    else:
-        caminho_unico = str(caminho_arquivo or "").strip()
-        caminhos_arquivo = [caminho_unico] if caminho_unico else []
-
-    if not caminhos_arquivo:
-        raise ValueError("Nenhum arquivo foi informado para leitura por IA.")
-
-    for caminho in caminhos_arquivo:
-        if not os.path.exists(caminho):
-            raise FileNotFoundError(f"Arquivo nao encontrado: {caminho}")
-
-    prompt_base = carregar_prompt_historico() + (
-        " Separe as observacoes por abrangencia: txt_observacoes contem somente informacoes "
-        "do ano/serie correspondente e ocorrencias daquele ano. "
-        "txt_observacoes_gerais contem somente informacoes que se aplicam ao historico inteiro, "
-        "sem vinculo com um ano especifico. Uma observacao intitulada geral mas que mencione "
-        "um ano/serie deve ser atribuida a esse ano em txt_observacoes. "
-        "Retorne a observacao geral no nivel principal e a mesma observacao em cada item de historicos. "
-        "Nao duplique o mesmo texto entre os dois campos, nao invente observacoes e use string vazia "
-        "quando nao houver informacao. Se a abrangencia for incerta, mantenha no ano associado "
-        "pelo documento e preserve o texto para revisao. "
-        "Registre todas as disciplinas extras em disciplinas_extra, com disciplina e nota, "
-        "sem repetir essas notas em txt_observacoes. Para conceitos, use a frase padrao "
-        "Aluno(a) recebeu o conceito \"SIGLA\" nas matérias: NOME; NOME. "
-        "Agrupe as matérias por conceito, sem repetir a sigla após cada matéria. "
-        "Quando houver conceitos diferentes, use uma frase por conceito, preservando cada avaliação. "
-        "A observacao geral sera usada somente para conferencia local do usuario."
-    )
-    conteudo_usuario = [
-        {
-            "type": "input_text",
-            "text": (
-                "Extraia os campos do historico e retorne APENAS JSON valido no schema solicitado. "
-                "Nao use markdown. "
-                "Preencha o array 'historicos' com um item por ano/serie encontrado. "
-                "Use serie sempre em formato ordinal (1º ANO, 2º ANO, etc.). "
-                "Mapeie disciplinas equivalentes (ex.: Ciencias da Natureza -> nota_ciencias). "
-                "Se o documento trouxer conceito em vez de nota numerica, registre isso em txt_observacoes "
-                "com texto curto e listando as materias; nao coloque a sigla em nota_*. "
-                "Quando necessario, use 'disciplinas_extra'."
-            ),
-        }
-    ]
-    conteudo_usuario.extend(
-        construir_conteudo_usuario_arquivos_openai(
-            caminhos_arquivo,
-            limite_texto=220000,
-            rotulo_imagem="Texto OCR da imagem para extracao:\n",
-            rotulo_pdf="Texto OCR/PDF para extracao:\n",
-        )
-    )
-
-    payload = {
-        "model": model or OCR_IA_MODEL_PADRAO,
-        "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
-        "input": [
-            {"role": "system", "content": [{"type": "input_text", "text": prompt_base}]},
-            {"role": "user", "content": conteudo_usuario},
-        ],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "historico_escolar_extracao",
-                "strict": True,
-                "schema": HISTORICO_JSON_SCHEMA,
+        conteudo_usuario = [
+            {
+                "type": "input_text",
+                "text": (
+                    "Extraia os campos do historico e retorne APENAS JSON valido no schema solicitado. "
+                    "Nao use markdown. "
+                    "Preencha o array 'historicos' com um item por ano/serie encontrado. "
+                    "Use serie sempre em formato ordinal (1º ANO, 2º ANO, etc.). "
+                    "Mapeie disciplinas equivalentes (ex.: Ciencias da Natureza -> nota_ciencias). "
+                    "Se o documento trouxer conceito em vez de nota numerica, registre isso em txt_observacoes "
+                    "com texto curto e listando as materias; nao coloque a sigla em nota_*. "
+                    "Quando necessario, use 'disciplinas_extra'."
+                ),
             }
-        },
-    }
+        ]
+        conteudo_usuario.extend(
+            construir_conteudo_usuario_arquivos_openai(
+                caminhos_arquivo,
+                limite_texto=220000,
+                rotulo_imagem="Texto OCR da imagem para extracao:\n",
+                rotulo_pdf="Texto OCR/PDF para extracao:\n",
+            )
+        )
 
-    corpo = enviar_requisicao_openai_com_retry(
-        url="https://api.openai.com/v1/responses",
-        payload=payload,
-        api_key=api_key,
-        timeout=OCR_IA_TIMEOUT_SEGUNDOS,
-        tentativas=OCR_IA_TENTATIVAS,
-    )
+        payload = {
+            "model": model or OCR_IA_MODEL_PADRAO,
+            "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": prompt_base}]},
+                {"role": "user", "content": conteudo_usuario},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "historico_escolar_extracao",
+                    "strict": True,
+                    "schema": HISTORICO_JSON_SCHEMA,
+                }
+            },
+        }
 
-    resposta_json = json.loads(corpo)
-    texto_modelo = extrair_texto_resposta_openai(resposta_json)
-    resultado = parse_json_seguro(texto_modelo)
+        corpo = enviar_requisicao_openai_com_retry(
+            url="https://api.openai.com/v1/responses",
+            payload=payload,
+            api_key=api_key,
+            timeout=OCR_IA_TIMEOUT_SEGUNDOS,
+            tentativas=OCR_IA_TENTATIVAS,
+        )
 
-    for chave in HISTORICO_JSON_SCHEMA["required"]:
-        if chave not in resultado or resultado[chave] is None:
-            resultado[chave] = [] if chave == "historicos" else ""
-    return resultado
+        resposta_json = json.loads(corpo)
+        record_usage(resposta_json)
+        texto_modelo = extrair_texto_resposta_openai(resposta_json)
+        resultado = parse_json_seguro(texto_modelo)
+
+        for chave in HISTORICO_JSON_SCHEMA["required"]:
+            if chave not in resultado or resultado[chave] is None:
+                resultado[chave] = [] if chave == "historicos" else ""
+        return resultado
 
 
 def extrair_campos_boletim_com_openai(caminhos, model=""):
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY não configurada para leitura do boletim.")
-    conteudo = [{"type": "input_text", "text": (
-        "Leia somente o boletim bimestral. Extraia nome, matrícula quando presente, ano, turma e "
-        "cada nota com disciplina e bimestre (1 a 4). Preserve nota zero; não calcule médias, "
-        "não confunda notas finais, recuperação, faltas ou carga horária com notas bimestrais. "
-        "Há vários modelos: boletim, ficha individual do estudante/criança e tabelas com cabeçalhos em mais de uma linha. "
-        "Leia pelas colunas 1º, 2º, 3º e 4º bimestres e suas subcolunas NT/Nota. "
-        "CH é carga horária, CONS é conselho, MD é média: não são notas bimestrais. "
-        "Arte equivale a Artes. Não confunda Matemática Lúdica com Matemática nem Leitura e Fluência com Língua Portuguesa. "
-        "A matrícula impressa pertence à escola de origem; extraia-a como está, sem tentar convertê-la para o GEMUL. "
-        "Omita notas ausentes/ilegíveis, traços e células vazias; jamais transforme traço/vazio em zero. "
-        "Nunca invente informações. Use string vazia para campos ausentes."
-    )}]
-    conteudo.extend(construir_conteudo_usuario_arquivos_openai(
-        caminhos, limite_texto=120000,
-        rotulo_imagem="Boletim bimestral:\n", rotulo_pdf="Boletim bimestral PDF:\n"))
-    payload = {
-        "model": model or OCR_IA_MODEL_PADRAO,
-        "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
-        "input": [{"role": "user", "content": conteudo}],
-        "text": {"format": {"type": "json_schema", "name": "boletim_bimestral",
-                              "strict": True, "schema": boletim_bimestral.SCHEMA}},
-    }
-    corpo = enviar_requisicao_openai_com_retry(
-        url="https://api.openai.com/v1/responses", payload=payload, api_key=api_key,
-        timeout=OCR_IA_TIMEOUT_SEGUNDOS, tentativas=OCR_IA_TENTATIVAS)
-    return parse_json_seguro(extrair_texto_resposta_openai(json.loads(corpo)))
+    from idp_observability import extraction, record_usage
+    with extraction("boletim", model or globals().get("OCR_IA_MODEL_PADRAO", "")):
+        api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY não configurada para leitura do boletim.")
+        conteudo = [{"type": "input_text", "text": (
+            "Leia somente o boletim bimestral. Extraia nome, matrícula quando presente, ano, turma e "
+            "cada nota com disciplina e bimestre (1 a 4). Preserve nota zero; não calcule médias, "
+            "não confunda notas finais, recuperação, faltas ou carga horária com notas bimestrais. "
+            "Há vários modelos: boletim, ficha individual do estudante/criança e tabelas com cabeçalhos em mais de uma linha. "
+            "Leia pelas colunas 1º, 2º, 3º e 4º bimestres e suas subcolunas NT/Nota. "
+            "CH é carga horária, CONS é conselho, MD é média: não são notas bimestrais. "
+            "Arte equivale a Artes. Não confunda Matemática Lúdica com Matemática nem Leitura e Fluência com Língua Portuguesa. "
+            "A matrícula impressa pertence à escola de origem; extraia-a como está, sem tentar convertê-la para o GEMUL. "
+            "Omita notas ausentes/ilegíveis, traços e células vazias; jamais transforme traço/vazio em zero. "
+            "Nunca invente informações. Use string vazia para campos ausentes."
+        )}]
+        conteudo.extend(construir_conteudo_usuario_arquivos_openai(
+            caminhos, limite_texto=120000,
+            rotulo_imagem="Boletim bimestral:\n", rotulo_pdf="Boletim bimestral PDF:\n"))
+        payload = {
+            "model": model or OCR_IA_MODEL_PADRAO,
+            "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
+            "input": [{"role": "user", "content": conteudo}],
+            "text": {"format": {"type": "json_schema", "name": "boletim_bimestral",
+                                  "strict": True, "schema": boletim_bimestral.SCHEMA}},
+        }
+        corpo = enviar_requisicao_openai_com_retry(
+            url="https://api.openai.com/v1/responses", payload=payload, api_key=api_key,
+            timeout=OCR_IA_TIMEOUT_SEGUNDOS, tentativas=OCR_IA_TENTATIVAS)
+        resposta_json = json.loads(corpo)
+        record_usage(resposta_json)
+        return parse_json_seguro(extrair_texto_resposta_openai(resposta_json))
 
 
 def extrair_campos_documento_civil_com_openai(caminho_arquivo: Any, model: str = "") -> Dict[str, Any]:
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY nao configurada. Defina a variavel de ambiente antes de usar leitura de documento civil com IA."
+    from idp_observability import extraction, record_usage
+    with extraction("documento_civil", model or globals().get("OCR_IA_MODEL_PADRAO", "")):
+        api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY nao configurada. Defina a variavel de ambiente antes de usar leitura de documento civil com IA."
+            )
+
+        if isinstance(caminho_arquivo, (list, tuple, set)):
+            caminhos_arquivo = [str(item).strip() for item in caminho_arquivo if str(item).strip()]
+        else:
+            caminho_unico = str(caminho_arquivo or "").strip()
+            caminhos_arquivo = [caminho_unico] if caminho_unico else []
+
+        if not caminhos_arquivo:
+            raise ValueError("Nenhum arquivo foi informado para leitura do documento civil por IA.")
+
+        for caminho in caminhos_arquivo:
+            if not os.path.exists(caminho):
+                raise FileNotFoundError(f"Arquivo nao encontrado: {caminho}")
+
+        prompt_base = (
+            "Voce extrai campos de documentos civis brasileiros, especialmente certidao de nascimento e RG. "
+            "Retorne apenas JSON valido no schema solicitado, sem markdown e sem inventar dados. "
+            "Quando um campo nao estiver legivel ou ausente, retorne string vazia."
         )
-
-    if isinstance(caminho_arquivo, (list, tuple, set)):
-        caminhos_arquivo = [str(item).strip() for item in caminho_arquivo if str(item).strip()]
-    else:
-        caminho_unico = str(caminho_arquivo or "").strip()
-        caminhos_arquivo = [caminho_unico] if caminho_unico else []
-
-    if not caminhos_arquivo:
-        raise ValueError("Nenhum arquivo foi informado para leitura do documento civil por IA.")
-
-    for caminho in caminhos_arquivo:
-        if not os.path.exists(caminho):
-            raise FileNotFoundError(f"Arquivo nao encontrado: {caminho}")
-
-    prompt_base = (
-        "Voce extrai campos de documentos civis brasileiros, especialmente certidao de nascimento e RG. "
-        "Retorne apenas JSON valido no schema solicitado, sem markdown e sem inventar dados. "
-        "Quando um campo nao estiver legivel ou ausente, retorne string vazia."
-    )
-    conteudo_usuario = [
-        {
-            "type": "input_text",
-            "text": (
-                "Extraia do documento civil os campos: tipo_documento, nome_aluno, sexo, data_nascimento, "
-                "naturalidade, pai, mae e numero_documento. "
-                "Em RG, se pai/mae nao estiverem presentes, retorne string vazia nesses campos. "
-                "Use data_nascimento no formato dd/mm/aaaa quando possivel."
-            ),
-        }
-    ]
-    conteudo_usuario.extend(
-        construir_conteudo_usuario_arquivos_openai(
-            caminhos_arquivo,
-            limite_texto=120000,
-            rotulo_imagem="Texto OCR da imagem do documento para extracao:\n",
-            rotulo_pdf="Texto OCR/PDF do documento para extracao:\n",
-        )
-    )
-
-    payload = {
-        "model": model or OCR_IA_MODEL_PADRAO,
-        "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
-        "input": [
-            {"role": "system", "content": [{"type": "input_text", "text": prompt_base}]},
-            {"role": "user", "content": conteudo_usuario},
-        ],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "documento_civil_extracao",
-                "strict": True,
-                "schema": DOCUMENTO_CIVIL_JSON_SCHEMA,
+        conteudo_usuario = [
+            {
+                "type": "input_text",
+                "text": (
+                    "Extraia do documento civil os campos: tipo_documento, nome_aluno, sexo, data_nascimento, "
+                    "naturalidade, pai, mae e numero_documento. "
+                    "Em RG, se pai/mae nao estiverem presentes, retorne string vazia nesses campos. "
+                    "Use data_nascimento no formato dd/mm/aaaa quando possivel."
+                ),
             }
-        },
-    }
+        ]
+        conteudo_usuario.extend(
+            construir_conteudo_usuario_arquivos_openai(
+                caminhos_arquivo,
+                limite_texto=120000,
+                rotulo_imagem="Texto OCR da imagem do documento para extracao:\n",
+                rotulo_pdf="Texto OCR/PDF do documento para extracao:\n",
+            )
+        )
 
-    corpo = enviar_requisicao_openai_com_retry(
-        url="https://api.openai.com/v1/responses",
-        payload=payload,
-        api_key=api_key,
-        timeout=OCR_IA_TIMEOUT_SEGUNDOS,
-        tentativas=OCR_IA_TENTATIVAS,
-    )
+        payload = {
+            "model": model or OCR_IA_MODEL_PADRAO,
+            "reasoning": {"effort": OCR_IA_REASONING_EFFORT},
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": prompt_base}]},
+                {"role": "user", "content": conteudo_usuario},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "documento_civil_extracao",
+                    "strict": True,
+                    "schema": DOCUMENTO_CIVIL_JSON_SCHEMA,
+                }
+            },
+        }
 
-    resposta_json = json.loads(corpo)
-    texto_modelo = extrair_texto_resposta_openai(resposta_json)
-    resultado = parse_json_seguro(texto_modelo)
+        corpo = enviar_requisicao_openai_com_retry(
+            url="https://api.openai.com/v1/responses",
+            payload=payload,
+            api_key=api_key,
+            timeout=OCR_IA_TIMEOUT_SEGUNDOS,
+            tentativas=OCR_IA_TENTATIVAS,
+        )
 
-    for chave in DOCUMENTO_CIVIL_JSON_SCHEMA["required"]:
-        if chave not in resultado or resultado[chave] is None:
-            resultado[chave] = ""
-    return resultado
+        resposta_json = json.loads(corpo)
+        record_usage(resposta_json)
+        texto_modelo = extrair_texto_resposta_openai(resposta_json)
+        resultado = parse_json_seguro(texto_modelo)
+
+        for chave in DOCUMENTO_CIVIL_JSON_SCHEMA["required"]:
+            if chave not in resultado or resultado[chave] is None:
+                resultado[chave] = ""
+        return resultado
 
 # FunÃ§Ã£o para validar o formato de data com barras
 def validar_data(data_str):

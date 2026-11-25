@@ -46,3 +46,8 @@ DEV_REPORT.md
 DEV_CONTEXT*.txt
 TEST_REPORT.txt
 pacote_SF-IDP-*.json
+
+# Local IDP telemetry
+idp_metrics.jsonl
+
+DEV_OUTPUT.txt
