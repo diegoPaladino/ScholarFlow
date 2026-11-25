@@ -51,3 +51,6 @@ pacote_SF-IDP-*.json
 idp_metrics.jsonl
 
 DEV_OUTPUT.txt
+
+# Local SQLite metrics and sidecars
+idp_metrics.sqlite3*

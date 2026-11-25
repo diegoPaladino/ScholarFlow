@@ -28,6 +28,12 @@ def _write(event):
     except Exception:
         # Telemetry must not replace the extraction result or exception.
         pass
+    try:
+        from idp_storage import store
+        store(event, LOG_PATH.with_suffix(".sqlite3"))
+    except Exception:
+        # Independent sink: preserve extraction even if SQLite is unavailable.
+        pass
 
 
 @contextmanager
