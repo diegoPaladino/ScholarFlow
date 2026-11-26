@@ -54,3 +54,6 @@ DEV_OUTPUT.txt
 
 # Local SQLite metrics and sidecars
 idp_metrics.sqlite3*
+
+# Private local dataset
+idp_dataset_local/
